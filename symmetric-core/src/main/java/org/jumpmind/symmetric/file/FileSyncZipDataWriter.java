@@ -43,11 +43,14 @@ import org.jumpmind.symmetric.io.data.DataEventType;
 import org.jumpmind.symmetric.io.data.IDataWriter;
 import org.jumpmind.symmetric.io.data.writer.DataWriterStatisticConstants;
 import org.jumpmind.symmetric.io.stage.IStagedResource;
+import org.jumpmind.symmetric.model.Channel;
 import org.jumpmind.symmetric.model.FileSnapshot;
 import org.jumpmind.symmetric.model.FileSnapshot.LastEventType;
 import org.jumpmind.symmetric.model.FileTrigger;
 import org.jumpmind.symmetric.model.FileTriggerRouter;
 import org.jumpmind.symmetric.model.Node;
+import org.jumpmind.symmetric.service.IConfigurationService;
+import org.jumpmind.symmetric.service.IExtensionService;
 import org.jumpmind.symmetric.service.IFileSyncService;
 import org.jumpmind.symmetric.service.INodeService;
 import org.jumpmind.util.Statistics;
@@ -69,13 +72,17 @@ public class FileSyncZipDataWriter implements IDataWriter {
     protected List<FileSnapshot> snapshotEvents;
     protected DataContext context;
     protected INodeService nodeService;
-
+    protected IExtensionService extensionService;
+    protected IConfigurationService configurationService;
+    
     public FileSyncZipDataWriter(long maxBytesToSync, IFileSyncService fileSyncService,
-            INodeService nodeService, IStagedResource stagedResource) {
+            INodeService nodeService, IStagedResource stagedResource, IExtensionService extensionService, IConfigurationService configurationService) {
         this.maxBytesToSync = maxBytesToSync;
         this.fileSyncService = fileSyncService;
         this.stagedResource = stagedResource;
         this.nodeService = nodeService;
+        this.extensionService = extensionService;
+        this.configurationService = configurationService;
     }
 
     public void open(DataContext context) {
@@ -104,13 +111,18 @@ public class FileSyncZipDataWriter implements IDataWriter {
 
     public void write(CsvData data) {
         DataEventType eventType = data.getDataEventType();
+        
         if (eventType == DataEventType.INSERT || eventType == DataEventType.UPDATE) {
-        		if (eventType == DataEventType.INSERT) {
-        			statistics.get(this.batch).increment(DataWriterStatisticConstants.INSERTCOUNT);
-        		}
-        		else {
-        			statistics.get(this.batch).increment(DataWriterStatisticConstants.UPDATECOUNT);
-        		}
+            if (filterInitialLoad(data)) {
+                return;
+            }
+            
+     		if (eventType == DataEventType.INSERT) {
+    			statistics.get(this.batch).increment(DataWriterStatisticConstants.INSERTCOUNT);
+    		}
+    		else {
+    			statistics.get(this.batch).increment(DataWriterStatisticConstants.UPDATECOUNT);
+    		}
             Map<String, String> columnData = data.toColumnNameValuePairs(
                     snapshotTable.getColumnNames(), CsvData.ROW_DATA);
             Map<String, String> oldColumnData = data.toColumnNameValuePairs(
@@ -119,13 +131,25 @@ public class FileSyncZipDataWriter implements IDataWriter {
             FileSnapshot snapshot = new FileSnapshot();
             snapshot.setTriggerId(columnData.get("TRIGGER_ID"));
             snapshot.setRouterId(columnData.get("ROUTER_ID"));
-            snapshot.setFileModifiedTime(Long.parseLong(columnData.get("FILE_MODIFIED_TIME")));
-            snapshot.setCrc32Checksum(Long.parseLong(columnData.get("CRC32_CHECKSUM")));
+            try {
+                snapshot.setFileModifiedTime(Long.parseLong(columnData.get("FILE_MODIFIED_TIME")));
+            } catch (NumberFormatException nfe) {
+                log.info("File modified time was not a number : " + columnData.get("FILE_MODIFIED_TIME") + " for file " + columnData.get("FILE_NAME"));
+            }
+            try {
+                snapshot.setCrc32Checksum(columnData.get("CRC32_CHECKSUM") == null ? 0 : Long.parseLong(columnData.get("CRC32_CHECKSUM")));
+            } catch (NumberFormatException nfe) {
+                log.info("Checksum was not a number : " + columnData.get("CRC32_CHECKSUM") + " for file " + columnData.get("FILE_NAME"));
+            }
             String oldChecksum = oldColumnData.get("CRC32_CHECKSUM");
             if (StringUtils.isNotBlank(oldChecksum)) {
                 snapshot.setOldCrc32Checksum(Long.parseLong(oldChecksum));
             }
-            snapshot.setFileSize(Long.parseLong(columnData.get("FILE_SIZE")));
+            try {
+                snapshot.setFileSize(Long.parseLong(columnData.get("FILE_SIZE")));
+            } catch (NumberFormatException nfe) {
+                log.info("Checksum was not a number : " + columnData.get("FILE_SIZE") + " for file " + columnData.get("FILE_NAME"));
+            }
             snapshot.setLastUpdateBy(columnData.get("LAST_UPDATE_BY"));
             snapshot.setFileName(columnData.get("FILE_NAME"));
             snapshot.setRelativeDir(columnData.get("RELATIVE_DIR"));
@@ -290,7 +314,7 @@ public class FileSyncZipDataWriter implements IDataWriter {
         if (isCClient(targetNodeId)) {
             return new BashFileSyncZipScript();
         } else {
-            return new BeanShellFileSyncZipScript();
+            return new BeanShellFileSyncZipScript(extensionService);
         }
     }
     
@@ -302,5 +326,30 @@ public class FileSyncZipDataWriter implements IDataWriter {
         }
         return cclient;
     }
+    
+    protected boolean filterInitialLoad(CsvData data) {
+        Channel channel = configurationService.getChannel(batch.getChannelId());
+        if (channel.isReloadFlag()) {
+            List<FileTriggerRouter> fileTriggerRouters = fileSyncService
+                    .getFileTriggerRoutersForCurrentNode(false);
+            Map<String, String> columnData = data.toColumnNameValuePairs(
+                    snapshotTable.getColumnNames(), CsvData.ROW_DATA);
+            String triggerId = columnData.get("TRIGGER_ID");
+            String routerId = columnData.get("ROUTER_ID");
+            
+            for (FileTriggerRouter fileTriggerRouter : fileTriggerRouters) {
+                if (fileTriggerRouter.getTriggerId().equals(triggerId)
+                        && fileTriggerRouter.getRouterId().equals(routerId)) {
+                    if (! fileTriggerRouter.isEnabled() || !fileTriggerRouter.isInitialLoadEnabled()) {
+                        return true;
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }    
     
 }

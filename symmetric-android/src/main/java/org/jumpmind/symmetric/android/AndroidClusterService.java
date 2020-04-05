@@ -28,7 +28,7 @@ import org.jumpmind.symmetric.service.impl.ClusterService;
 public class AndroidClusterService extends ClusterService {
     
     public AndroidClusterService(IParameterService parameterService, ISymmetricDialect dialect, INodeService nodeService) {
-        super(parameterService, dialect, nodeService);
+        super(parameterService, dialect, nodeService, null);
     }
     
     @Override

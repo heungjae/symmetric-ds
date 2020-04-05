@@ -22,7 +22,9 @@ package org.jumpmind.db.platform.postgresql;
 import java.sql.Types;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
+import org.apache.commons.lang.StringUtils;
 import org.jumpmind.db.alter.AddColumnChange;
 import org.jumpmind.db.alter.ColumnAutoIncrementChange;
 import org.jumpmind.db.alter.ColumnDataTypeChange;
@@ -37,6 +39,7 @@ import org.jumpmind.db.model.Column;
 import org.jumpmind.db.model.ColumnTypes;
 import org.jumpmind.db.model.Database;
 import org.jumpmind.db.model.IIndex;
+import org.jumpmind.db.model.PlatformColumn;
 import org.jumpmind.db.model.Table;
 import org.jumpmind.db.platform.AbstractDdlBuilder;
 import org.jumpmind.db.platform.DatabaseNamesConstants;
@@ -106,6 +109,11 @@ public class PostgreSqlDdlBuilder extends AbstractDdlBuilder {
     public static boolean isUsePseudoSequence() {
         return "true".equalsIgnoreCase(System.getProperty(
                 "org.jumpmind.symmetric.ddl.use.table.seq", "false"));
+    }
+    
+    public static boolean isMapCharToJson() {
+        return "true".equalsIgnoreCase(System.getProperty(
+                "org.jumpmind.symmetric.ddl.use.postgres.map.json", "true"));
     }
 
     @Override
@@ -195,6 +203,10 @@ public class PostgreSqlDdlBuilder extends AbstractDdlBuilder {
             println("$$ LANGUAGE plpgsql; ", ddl);
         } else {
             ddl.append("CREATE SEQUENCE ");
+            if (StringUtils.isNotBlank(table.getSchema())) {
+            		printIdentifier(table.getSchema(), ddl);
+            		ddl.append(".");
+            }
             printIdentifier(getConstraintName(null, table, column.getName(), "seq"), ddl);
             printEndOfStatement(ddl);
         }
@@ -219,6 +231,10 @@ public class PostgreSqlDdlBuilder extends AbstractDdlBuilder {
             printEndOfStatement(ddl);
         } else {
             ddl.append("DROP SEQUENCE ");
+            if (StringUtils.isNotBlank(table.getSchema())) {
+	        		printIdentifier(table.getSchema(), ddl);
+	        		ddl.append(".");
+	        }
             printIdentifier(getConstraintName(null, table, column.getName(), "seq"), ddl);
             printEndOfStatement(ddl);
         }
@@ -232,6 +248,10 @@ public class PostgreSqlDdlBuilder extends AbstractDdlBuilder {
             ddl.append("()");
         } else {
             ddl.append(" DEFAULT nextval('");
+            if (StringUtils.isNotBlank(table.getSchema())) {
+	        		printIdentifier(table.getSchema(), ddl);
+	        		ddl.append(".");
+	        }
             printIdentifier(getConstraintName(null, table, column.getName(), "seq"), ddl);
             ddl.append("')");
         }
@@ -416,9 +436,38 @@ public class PostgreSqlDdlBuilder extends AbstractDdlBuilder {
                 ((defaultValue.endsWith("::uuid") && Types.OTHER == typeCode) ||
                  (defaultValue.contains("::") && Types.ARRAY == typeCode))) {
             ddl.append(defaultValue);
+        } else if (Types.BOOLEAN == typeCode) {
+        		boolean isNull = false;
+            if (defaultValue==null || defaultValue.equalsIgnoreCase("null")) {
+                isNull = true;
+            }
+            if (!isNull) {
+            		ddl.append(databaseInfo.getValueQuoteToken());
+                ddl.append(escapeStringValue(defaultValue));
+                ddl.append(databaseInfo.getValueQuoteToken());
+            } else {
+                ddl.append(defaultValue);
+            }
         } else {
-            super.printDefaultValue(defaultValue, typeCode, ddl);
+        		super.printDefaultValue(defaultValue, typeCode, ddl);
         }
     }
-
+    
+    
+    @Override
+    protected String getSqlType(Column column) {
+    		
+    		String type = super.getSqlType(column);
+    		if (type.startsWith("CHAR") && column.getPlatformColumns() != null) {
+    			if (isMapCharToJson()) {
+    				for (Map.Entry<String, PlatformColumn> platformColumn : column.getPlatformColumns().entrySet()) {
+		    			if (platformColumn.getValue() != null && platformColumn.getValue().getType() != null &&
+		    					platformColumn.getValue().getType().equals("JSON")) {
+		    				type = "JSONB";
+		    			}
+		    		}
+    			}
+    		}
+    		return type;
+    }
 }

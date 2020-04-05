@@ -66,6 +66,8 @@ public class JdbcSqlTransaction implements ISqlTransaction {
     
     protected List<ISqlTransactionListener> listeners = new ArrayList<ISqlTransactionListener>();
     
+    protected int batchSize = 100;
+    
     public JdbcSqlTransaction(JdbcSqlTemplate jdbcSqlTemplate) {
         this(jdbcSqlTemplate, false);
     }
@@ -74,6 +76,7 @@ public class JdbcSqlTransaction implements ISqlTransaction {
         this.autoCommit = autoCommit;
         this.jdbcSqlTemplate = jdbcSqlTemplate;
         this.logSqlBuilder = jdbcSqlTemplate.logSqlBuilder;
+        this.batchSize = jdbcSqlTemplate.getSettings().getBatchSize();
         this.init();
     }
     
@@ -329,18 +332,7 @@ public class JdbcSqlTransaction implements ISqlTransaction {
                 try {
                     stmt = con.prepareStatement(sql);
                     jdbcSqlTemplate.setValues(stmt, args, types, jdbcSqlTemplate.getLobHandler().getDefaultHandler());
-                    
-                    long startTime = System.currentTimeMillis();
-                    boolean hasResults = stmt.execute();
-                    long endTime = System.currentTimeMillis();
-                    logSqlBuilder.logSql(log, sql, args, types, (endTime-startTime));
-                    
-                    if (hasResults) {
-                        rs = stmt.getResultSet();
-                        while (rs.next()) {
-                        }
-                    }
-                    return stmt.getUpdateCount();
+                    return executePreparedUpdate(stmt, sql, args, types);
                 } catch (SQLException e) {
                     throw logSqlBuilder.logSqlAfterException(log, sql, args, e);
                 } finally {
@@ -464,18 +456,53 @@ public class JdbcSqlTransaction implements ISqlTransaction {
                 long end = System.currentTimeMillis();
                 logSqlBuilder.logSql(log, "addBatch()", psql, args, argTypes, (end-start));
                 
-                if (markers.size() >= jdbcSqlTemplate.getSettings().getBatchSize()) {
+                if (markers.size() >= this.batchSize) {
                     rowsUpdated = flush();
                 }
             } else {
-                long start = System.currentTimeMillis();
-                pstmt.execute();
-                long end = System.currentTimeMillis();
-                logSqlBuilder.logSql(log, psql, args, argTypes, (end-start));
-                rowsUpdated = pstmt.getUpdateCount();
+                rowsUpdated = executePreparedUpdate(pstmt, psql, args, argTypes);
             }
         } catch (SQLException ex) {
             throw jdbcSqlTemplate.translate(ex);
+        }
+        return rowsUpdated;
+    }
+    
+    public void setBatchSize(int batchSize) {
+        this.batchSize = batchSize;
+    }
+    
+    public int getBatchSize() {
+        return this.batchSize;
+    }
+    
+    protected int executePreparedUpdate(PreparedStatement preparedStatement, String sql, Object[] args, int[] argTypes) throws SQLException {
+        int rowsUpdated = 0;
+        long start = System.currentTimeMillis();
+        if (jdbcSqlTemplate.getSettings().isAllowUpdatesWithResults()) {
+            rowsUpdated = executeAllowingResults(preparedStatement);
+        } else {
+            rowsUpdated = preparedStatement.executeUpdate();
+        }
+        long end = System.currentTimeMillis();
+        logSqlBuilder.logSql(log, sql, args, argTypes, (end-start));
+        return rowsUpdated;
+    }
+
+    protected int executeAllowingResults(PreparedStatement preparedStatement) throws SQLException {
+        int rowsUpdated = 0;
+        boolean hasResultsFlag = preparedStatement.execute();
+        int currentUpdateCount = preparedStatement.getUpdateCount();
+        if (currentUpdateCount != -1) {
+            rowsUpdated = currentUpdateCount;
+        }
+
+        while (hasResultsFlag || currentUpdateCount != -1) {
+            hasResultsFlag = preparedStatement.getMoreResults();
+            currentUpdateCount = preparedStatement.getUpdateCount();
+            if (currentUpdateCount != -1) {
+                rowsUpdated = currentUpdateCount;
+            }            
         }
         return rowsUpdated;
     }

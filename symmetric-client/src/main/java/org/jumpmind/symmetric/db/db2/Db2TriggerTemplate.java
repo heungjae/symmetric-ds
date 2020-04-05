@@ -22,6 +22,7 @@ package org.jumpmind.symmetric.db.db2;
 
 import java.util.HashMap;
 
+import org.jumpmind.db.model.Table;
 import org.jumpmind.symmetric.db.AbstractTriggerTemplate;
 import org.jumpmind.symmetric.db.ISymmetricDialect;
 
@@ -34,11 +35,11 @@ public class Db2TriggerTemplate extends AbstractTriggerTemplate {
         xmlColumnTemplate = null;
         arrayColumnTemplate = null;
         numberColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' else '\"' || trim(char($(tableAlias).\"$(columnName)\")) || '\"' end" ;
-        datetimeColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' else '\"' || rtrim(char(year(timestamp_iso($(tableAlias).\"$(columnName)\"))))||'-'||substr(digits(month(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||'-'||substr(digits(day(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||' '||substr(digits(hour(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||':'||substr(digits(minute(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||':'||substr(digits(second(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||'.'||RIGHT(REPEAT('0',6)||rtrim(char(microsecond(timestamp_iso($(tableAlias).\"$(columnName)\")))),6) || '\"' end" ;
+        datetimeColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' else '\"' || lpad(rtrim(char(year(timestamp_iso($(tableAlias).\"$(columnName)\")))),4,0)||'-'||substr(digits(month(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||'-'||substr(digits(day(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||' '||substr(digits(hour(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||':'||substr(digits(minute(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||':'||substr(digits(second(timestamp_iso($(tableAlias).\"$(columnName)\"))),9)||'.'||RIGHT(REPEAT('0',6)||rtrim(char(microsecond(timestamp_iso($(tableAlias).\"$(columnName)\")))),6) || '\"' end" ;
         timeColumnTemplate = null;
         dateColumnTemplate = null;
-        clobColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' else '\"' || replace(replace(cast($(tableAlias).\"$(columnName)\" as varchar(32672)),'\\','\\\\'),'\"','\\\"') || '\"' end" ;
-        blobColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' else '\"' || hex(cast($(tableAlias).\"$(columnName)\" as varchar(16336) for bit data)) || '\"' end" ;
+        clobColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' when length($(tableAlias).\"$(columnName)\") > 32672 then '\b' else '\"' || replace(replace(cast($(tableAlias).\"$(columnName)\" as varchar(32672)),'\\','\\\\'),'\"','\\\"') || '\"' end" ;
+        blobColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' when length($(tableAlias).\"$(columnName)\") > 16336 then hex('\b') else '\"' || hex(cast($(tableAlias).\"$(columnName)\" as varchar(16336) for bit data)) || '\"' end" ;
         wrappedBlobColumnTemplate = null;
         booleanColumnTemplate = null;
         triggerConcatCharacter = "||" ;
@@ -123,23 +124,17 @@ public class Db2TriggerTemplate extends AbstractTriggerTemplate {
 "                                REFERENCING OLD AS OLD NEW AS NEW                                                                                                                                      \n"+
 "                                FOR EACH ROW MODE DB2SQL                                                                                                                                               \n"+
 "                                BEGIN ATOMIC                                                                                                                                                           \n"+
-"                                    DECLARE var_row_data VARCHAR(16336);                                                                                                                               \n"+
-"                                    DECLARE var_old_data VARCHAR(16336);                                                                                                                               \n"+
 "                                    $(custom_before_update_text) \n" +
 "                                    IF $(syncOnUpdateCondition) and $(syncOnIncomingBatchCondition) then                                                                                               \n"+
-"                                        SET var_row_data = $(oracleToClob)$(columns);                                                                                                                                 \n"+
-"                                        SET var_old_data = $(oracleToClob)$(oldColumns);                                                                                                                              \n"+
-"                                        IF $(dataHasChangedCondition) THEN                                                                                                                             \n"+
 "                                            INSERT into $(defaultSchema)$(prefixName)_data                                                                                                             \n"+
 "                                                (table_name, event_type, trigger_hist_id, pk_data, channel_id, transaction_id, source_node_id, external_data, create_time)         \n"+
 "                                            VALUES('$(targetTableName)', 'R', $(triggerHistoryId),                                                                                                     \n"+
-"                                                $(oracleToClob)$(oldKeys),                                                                                                                             \n"+
+"                                                $(oracleToClob)$(newKeys),                                                                                                                             \n"+
 "                                                $(channelExpression),                                                                                                                                      \n"+
 "                                                $(txIdExpression),                                                                                                                                     \n"+
 "                                                $(sourceNodeExpression),                                                                                                                               \n"+
 "                                                $(externalSelect),                                                                                                                                     \n"+
 "                                                CURRENT_TIMESTAMP);                                                                                                                                    \n"+
-"                                        END IF;                                                                                                                                                        \n"+
 "                                    END IF;                                                                                                                                                            \n"+
 "                                    $(custom_on_update_text)                                                                                                                                           \n"+
 "                                END                                                                                                                                                                    " );
@@ -169,6 +164,14 @@ public class Db2TriggerTemplate extends AbstractTriggerTemplate {
 
         sqlTemplates.put("initialLoadSqlTemplate" ,
 "select $(oracleToClob)$(columns) from $(schemaName)$(tableName) t where $(whereClause)                                                                                                                                " );
+    }
+
+    protected String toClobExpression(Table table) {
+        if (table.hasNTypeColumns()) {
+            return "nclob('')||";
+        } else {
+            return "clob('')||";
+        }
     }
 
 }

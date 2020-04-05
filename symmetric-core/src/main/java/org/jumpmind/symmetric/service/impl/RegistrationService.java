@@ -44,6 +44,7 @@ import org.jumpmind.symmetric.common.Constants;
 import org.jumpmind.symmetric.common.ParameterConstants;
 import org.jumpmind.symmetric.config.INodeIdCreator;
 import org.jumpmind.symmetric.ext.INodeRegistrationListener;
+import org.jumpmind.symmetric.ext.IRegistrationRedirect;
 import org.jumpmind.symmetric.model.Node;
 import org.jumpmind.symmetric.model.NodeGroupLink;
 import org.jumpmind.symmetric.model.NodeHost;
@@ -96,6 +97,8 @@ public class RegistrationService extends AbstractService implements IRegistratio
     private IExtensionService extensionService;
     
     private ISymmetricEngine engine;
+
+    private boolean allowClientRegistration = true;
 
     public RegistrationService(ISymmetricEngine engine) {
         super(engine.getParameterService(), engine.getSymmetricDialect());
@@ -150,7 +153,13 @@ public class RegistrationService extends AbstractService implements IRegistratio
 
     	Node processedNode = new Node();
     	processedNode.setSyncEnabled(false);
-        Node identity = nodeService.findIdentity();
+
+        if (!allowClientRegistration) {
+            log.warn("Cannot register a client node until this node has synced triggers");
+            return processedNode;
+        }
+    	
+    	Node identity = nodeService.findIdentity();
         if (identity == null) {
             RegistrationRequest req = new RegistrationRequest(nodePriorToRegistration,
                     RegistrationStatus.ER, remoteHost, remoteAddress);
@@ -178,7 +187,15 @@ public class RegistrationService extends AbstractService implements IRegistratio
                 }
             }
 
-            String redirectUrl = getRedirectionUrlFor(nodePriorToRegistration.getExternalId());
+            String redirectUrl = null;
+            IRegistrationRedirect registrationRedirect = extensionService.getExtensionPoint(IRegistrationRedirect.class);
+            if (registrationRedirect != null) {
+                redirectUrl = registrationRedirect.getRedirectionUrlFor(nodePriorToRegistration.getExternalId(),
+                        nodePriorToRegistration.getNodeGroupId());
+            } else {
+                redirectUrl = getRedirectionUrlFor(nodePriorToRegistration.getExternalId());
+            }
+
             if (redirectUrl != null) {
                 log.info("Redirecting {} to {} for registration.",
                         nodePriorToRegistration.getExternalId(), redirectUrl);
@@ -233,7 +250,8 @@ public class RegistrationService extends AbstractService implements IRegistratio
             foundNode.setDatabaseVersion(nodePriorToRegistration.getDatabaseVersion());
             foundNode.setSymmetricVersion(nodePriorToRegistration.getSymmetricVersion());
             foundNode.setDeploymentType(nodePriorToRegistration.getDeploymentType());
-            nodeService.save(foundNode);                        
+            nodeService.save(foundNode);
+            log.info("Completed registration of node " + foundNode.toString());
             
             /**
              * Only send automatic initial load once or if the client is really
@@ -583,7 +601,7 @@ public class RegistrationService extends AbstractService implements IRegistratio
             }
             
             if (isNotBlank(remoteHost)) {
-                NodeHost nodeHost = new NodeHost(node.getNodeId(), engine.getClusterService().getInstanceId());
+                NodeHost nodeHost = new NodeHost(node.getNodeId(), null);
                 nodeHost.setHeartbeatTime(new Date());
                 nodeHost.setIpAddress(remoteAddress);
                 nodeHost.setHostName(remoteHost);
@@ -640,7 +658,7 @@ public class RegistrationService extends AbstractService implements IRegistratio
                         nodeId, password, masterToMasterOnly ? null : me.getNodeId() });
                 
                 if (isNotBlank(remoteHost)) {
-                    NodeHost nodeHost = new NodeHost(node.getNodeId(), engine.getClusterService().getInstanceId());
+                    NodeHost nodeHost = new NodeHost(node.getNodeId(), null);
                     nodeHost.setHeartbeatTime(new Date());
                     nodeHost.setIpAddress(remoteAddress);
                     nodeHost.setHostName(remoteHost);
@@ -731,7 +749,11 @@ public class RegistrationService extends AbstractService implements IRegistratio
         }        
     }
 
-    class RegistrationRequestMapper implements ISqlRowMapper<RegistrationRequest> {
+    public void setAllowClientRegistration(boolean enabled) {
+        this.allowClientRegistration = enabled;
+    }
+
+    static class RegistrationRequestMapper implements ISqlRowMapper<RegistrationRequest> {
         public RegistrationRequest mapRow(Row rs) {
             RegistrationRequest request = new RegistrationRequest();
             request.setNodeGroupId(rs.getString("node_group_id"));

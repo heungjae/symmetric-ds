@@ -57,11 +57,14 @@ import org.jumpmind.db.sql.ISqlTransaction;
 import org.jumpmind.db.sql.Row;
 import org.jumpmind.db.sql.SqlException;
 import org.jumpmind.db.util.BinaryEncoding;
+import org.jumpmind.exception.HttpException;
+import org.jumpmind.exception.InvalidRetryException;
 import org.jumpmind.exception.IoException;
 import org.jumpmind.symmetric.ISymmetricEngine;
 import org.jumpmind.symmetric.SymmetricException;
 import org.jumpmind.symmetric.Version;
 import org.jumpmind.symmetric.common.Constants;
+import org.jumpmind.symmetric.common.ContextConstants;
 import org.jumpmind.symmetric.common.ErrorConstants;
 import org.jumpmind.symmetric.common.ParameterConstants;
 import org.jumpmind.symmetric.ext.INodeRegistrationListener;
@@ -549,7 +552,9 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
 
             long memoryThresholdInBytes = parameterService.getLong(ParameterConstants.STREAM_TO_FILE_THRESHOLD);
             String targetNodeId = nodeService.findIdentityNodeId();
-            if (parameterService.is(ParameterConstants.STREAM_TO_FILE_ENABLED)) {
+            
+            boolean streamToFile = parameterService.is(ParameterConstants.STREAM_TO_FILE_ENABLED);
+            if (streamToFile) {
                 transferInfo.setStatus(ProcessStatus.TRANSFERRING);
                 
                 if (threadFactory == null) {
@@ -571,18 +576,19 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
 
                 OutputStreamWriter outWriter = null;
                 if (out != null) {
-                    outWriter = new OutputStreamWriter(out, IoConstants.ENCODING);
-                    long keepAliveMillis = parameterService.getLong(ParameterConstants.DATA_LOADER_SEND_ACK_KEEPALIVE);
-                    while (!executor.awaitTermination(keepAliveMillis, TimeUnit.MILLISECONDS)) {
-                        outWriter.write("1=1&");
-                        outWriter.flush();
+                    try {                        
+                        outWriter = new OutputStreamWriter(out, IoConstants.ENCODING);
+                        long keepAliveMillis = parameterService.getLong(ParameterConstants.DATA_LOADER_SEND_ACK_KEEPALIVE);
+                        while (!executor.awaitTermination(keepAliveMillis, TimeUnit.MILLISECONDS)) {
+                            outWriter.write("1=1&");
+                            outWriter.flush();
+                        }
+                    } catch (Exception ex) {
+                        log.warn("Failed to send keep alives to " + sourceNode + " " + ex.toString());
+                        awaitTermination(executor);          
                     }
                 } else {
-                    long hours = 1;
-                    while (!executor.awaitTermination(1, TimeUnit.HOURS)) {
-                        log.info(String.format("Executor has been awaiting loader termination for %d hour(s).", hours));
-                        hours++;
-                    }            
+                    awaitTermination(executor);            
                 }
                 
                 loadListener.isDone();
@@ -592,7 +598,7 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
                         , transferInfo.getQueue(), nodeService.findIdentityNodeId(), PULL_JOB_LOAD));
                 try {
                     DataProcessor processor = new DataProcessor(new ProtocolDataReader(BatchType.LOAD,
-                            targetNodeId, transport.openReader()), null, listener, "data load") {
+                            targetNodeId, transport.openReader(), streamToFile), null, listener, "data load") {
                         @Override
                         protected IDataWriter chooseDataWriter(Batch batch) {
                             return buildDataWriter(loadInfo, sourceNode.getNodeId(),
@@ -628,6 +634,14 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
         return listener.getBatchesProcessed();
     }
 
+    private void awaitTermination(ExecutorService executor) throws InterruptedException {
+        long hours = 1;
+        while (!executor.awaitTermination(1, TimeUnit.HOURS)) {
+            log.info(String.format("Executor has been awaiting loader termination for %d hour(s).", hours));
+            hours++;
+        }
+    }
+
     protected void logOrRethrow(Throwable ex) throws IOException {
         if (ex instanceof RegistrationRequiredException) {
             throw (RegistrationRequiredException) ex;
@@ -645,8 +659,12 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
             throw (AuthenticationException) ex;
         } else if (ex instanceof SyncDisabledException) {
             throw (SyncDisabledException) ex;
+        } else if (ex instanceof HttpException) {
+            throw (HttpException) ex;
         } else if (ex instanceof IOException) {
             throw (IOException) ex;
+        } else if (ex instanceof InvalidRetryException) {
+            throw (InvalidRetryException) ex;
         } else if (!(ex instanceof ConflictException) && !(ex instanceof SqlException)) {
             log.error("Failed to process batch", ex);
         } else {
@@ -922,7 +940,7 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
         }
     }
 
-    class IncomingErrorMapper implements ISqlRowMapper<IncomingError> {
+    static class IncomingErrorMapper implements ISqlRowMapper<IncomingError> {
         public IncomingError mapRow(Row rs) {
             IncomingError incomingError = new IncomingError();
             incomingError.setBatchId(rs.getLong("batch_id"));
@@ -980,12 +998,34 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
             batchStartsToArriveTimeInMs = System.currentTimeMillis();
         }
 
+        protected ProtocolDataReader buildDataReader(final Batch batchInStaging, final IStagedResource resource) {
+            return new ProtocolDataReader(BatchType.LOAD, batchInStaging.getTargetNodeId(), resource) {
+                @Override
+                public Table nextTable() {
+                    Table table = super.nextTable();
+                    if (table != null && listener.currentBatch != null) {
+                        listener.currentBatch.incrementTableCount(table.getNameLowerCase());
+                    }
+                    return table;
+                }        
+                
+                public Batch nextBatch() {
+                    Batch nextBatch = super.nextBatch();
+                    if (nextBatch != null) {
+                        nextBatch.setStatistics(batchInStaging.getStatistics());
+                    }
+                    return nextBatch;
+                }
+            };
+        }
+        
         public void end(final DataContext ctx, final Batch batchInStaging, final IStagedResource resource) {
             final long networkMillis = System.currentTimeMillis() - batchStartsToArriveTimeInMs;
 
             Callable<IncomingBatch> loadBatchFromStage = new Callable<IncomingBatch>() {
                 public IncomingBatch call() throws Exception {
                     IncomingBatch incomingBatch = null;
+                    DataProcessor processor = null;
                     if (!isError && resource != null && resource.exists()) {
                         try {
                             loadInfo = statisticManager.newProcessInfo(new ProcessInfoKey(transferInfo.getSourceNodeId(),
@@ -996,25 +1036,9 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
 
                             loadInfo.setStatus(ProcessInfo.ProcessStatus.LOADING);
                             
-                            ProtocolDataReader reader = new ProtocolDataReader(BatchType.LOAD, batchInStaging.getTargetNodeId(), resource) {
-                                @Override
-                                public Table nextTable() {
-                                    Table table = super.nextTable();
-                                    if (table != null && listener.currentBatch != null) {
-                                        listener.currentBatch.incrementTableCount(table.getNameLowerCase());
-                                    }
-                                    return table;
-                                }        
-                                
-                                public Batch nextBatch() {
-                                    Batch nextBatch = super.nextBatch();
-                                    if (nextBatch != null) {
-                                        nextBatch.setStatistics(batchInStaging.getStatistics());
-                                    }
-                                    return nextBatch;
-                                }
-                            };
-                            DataProcessor processor = new DataProcessor(reader, null, listener, "data load from stage") {
+                            ProtocolDataReader reader = buildDataReader(batchInStaging, resource);
+                            
+                            processor = new DataProcessor(reader, null, listener, "data load from stage") {
                                 @Override
                                 protected IDataWriter chooseDataWriter(Batch batch) {
                                     boolean isRetry = ((ManageIncomingBatchListener) listener).getCurrentBatch().isRetry();
@@ -1027,8 +1051,25 @@ public class DataLoaderService extends AbstractService implements IDataLoaderSer
                                 loadInfo.setStatus(ProcessStatus.OK);
                             }
                         } catch (Exception e) {
-                            isError = true;
-                            throw e;
+                            if (ctx.get(ContextConstants.CONTEXT_BULK_WRITER_TO_USE) != null && ctx.get(ContextConstants.CONTEXT_BULK_WRITER_TO_USE).equals("bulk")) {
+                                log.debug("Bulk loader failed : ", e);
+                                ctx.put(ContextConstants.CONTEXT_BULK_WRITER_TO_USE, "default");
+                                listener.currentBatch.setStatus(Status.OK);
+                                processor.setDataReader(buildDataReader(batchInStaging, resource));
+                                try {
+                                    listener.getBatchesProcessed().remove(listener.currentBatch);
+                                    processor.process(ctx);
+                                } catch (Exception retryException) {
+                                    isError = true;
+                                    incomingBatch = listener.currentBatch;
+                                    incomingBatch.setStatus(Status.ER);
+                                    incomingBatchService.updateIncomingBatch(incomingBatch);
+                                    throw e;
+                                }
+                            } else {
+                                isError = true;
+                                throw e;
+                            }
                         } finally {
                             incomingBatch = listener.currentBatch; 
                             if (incomingBatch != null) {

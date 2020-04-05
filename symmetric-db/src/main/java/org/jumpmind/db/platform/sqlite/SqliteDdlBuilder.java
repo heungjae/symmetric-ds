@@ -22,7 +22,11 @@ package org.jumpmind.db.platform.sqlite;
 
 import java.sql.Connection;
 import java.sql.Types;
+import java.util.Collection;
+import java.util.Iterator;
 
+import org.apache.commons.lang.StringUtils;
+import org.jumpmind.db.alter.*;
 import org.jumpmind.db.model.Column;
 import org.jumpmind.db.model.Database;
 import org.jumpmind.db.model.ForeignKey;
@@ -168,6 +172,13 @@ public class SqliteDdlBuilder extends AbstractDdlBuilder {
     }
 
     @Override
+    protected void writeColumnDefaultValue(Table table, Column column, StringBuilder ddl) {
+        ddl.append("(");
+        super.writeColumnDefaultValue(table, column, ddl);
+        ddl.append(")");
+    }
+
+    @Override
     protected void createTable(Table table, StringBuilder ddl, boolean temporary, boolean recreate) {
         // SQL Lite does not allow auto increment columns on a composite primary key.  Solution is to turn off
         // Auto increment and still support composite key
@@ -179,4 +190,18 @@ public class SqliteDdlBuilder extends AbstractDdlBuilder {
         super.createTable(table, ddl, temporary, recreate);
     }
     
+    @Override
+    protected void renameTable(Table sourceTable, Table tempTable, StringBuilder ddl) {
+        dropTemporaryTable(tempTable, ddl);
+       
+        for(IIndex index : sourceTable.getIndices()) {
+            writeExternalIndexDropStmt(tempTable, index, ddl);
+        }
+        
+        ddl.append("ALTER TABLE ");
+        ddl.append(getFullyQualifiedTableNameShorten(sourceTable));
+        ddl.append(" RENAME TO ");
+        ddl.append(getFullyQualifiedTableNameShorten(tempTable));
+        printEndOfStatement(ddl);
+    }
 }

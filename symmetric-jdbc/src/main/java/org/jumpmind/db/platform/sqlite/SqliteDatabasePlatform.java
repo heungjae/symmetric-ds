@@ -20,6 +20,7 @@
  */
 package org.jumpmind.db.platform.sqlite;
 
+import java.sql.Connection;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -32,6 +33,7 @@ import org.jumpmind.db.platform.PermissionResult;
 import org.jumpmind.db.platform.PermissionResult.Status;
 import org.jumpmind.db.platform.PermissionType;
 import org.jumpmind.db.sql.ISqlTemplate;
+import org.jumpmind.db.sql.JdbcSqlTemplate;
 import org.jumpmind.db.sql.Row;
 import org.jumpmind.db.sql.SqlException;
 import org.jumpmind.db.sql.SqlTemplateSettings;
@@ -86,6 +88,12 @@ public class SqliteDatabasePlatform extends AbstractJdbcDatabasePlatform impleme
         return new SqliteJdbcSqlTemplate(dataSource, settings, null, getDatabaseInfo());
     }
 
+    protected ISqlTemplate createSqlTemplateDirty() {
+        JdbcSqlTemplate sqlTemplateDirty = new SqliteJdbcSqlTemplate(dataSource, settings, null, getDatabaseInfo());
+        sqlTemplateDirty.setIsolationLevel(Connection.TRANSACTION_READ_UNCOMMITTED);
+        return sqlTemplateDirty;
+    }
+
     @Override
     protected String getDateTimeStringValue(String name, int type, Row row, boolean useVariableDates) {
         return row.getString(name);
@@ -129,7 +137,7 @@ public class SqliteDatabasePlatform extends AbstractJdbcDatabasePlatform impleme
        	String triggerSql = "CREATE TRIGGER TEST_TRIGGER AFTER UPDATE ON " + delimiter + PERMISSION_TEST_TABLE_NAME + delimiter 
        			+ "FOR EACH ROW BEGIN SELECT 1; END";
        	
-       	PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, Status.FAIL);
+       	PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, triggerSql);
        	
    		try {
    			getSqlTemplate().update(triggerSql);

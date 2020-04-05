@@ -30,10 +30,11 @@ import org.jumpmind.util.FormatUtils;
 
 public class Db2zOsTriggerTemplate extends Db2TriggerTemplate {
 
+    
     public Db2zOsTriggerTemplate(ISymmetricDialect symmetricDialect) {
         super(symmetricDialect);
         
-        stringColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null then '' else '\"' || replace(replace($(tableAlias).\"$(columnName)\",'\\','\\\\'),'\"','\\\"') || '\"' end" ;
+        stringColumnTemplate = "case when $(tableAlias).\"$(columnName)\" is null or $(tableAlias).\"$(columnName)\" = '' then $(oracleToClob)'' else '\"' || replace(replace($(oracleToClob)$(tableAlias).\"$(columnName)\",'\\','\\\\'),'\"','\\\"') || '\"' end" ;
         
         sqlTemplates.put("insertTriggerTemplate" ,
 "CREATE TRIGGER $(schemaName)$(triggerName)                                                                                                                                                             \n" +
@@ -105,7 +106,7 @@ public class Db2zOsTriggerTemplate extends Db2TriggerTemplate {
 "                                            INSERT into $(defaultSchema)$(prefixName)_data                                                                                                             \n"+
 "                                                (table_name, event_type, trigger_hist_id, pk_data, channel_id, transaction_id, source_node_id, external_data, create_time)         \n"+
 "                                            VALUES('$(targetTableName)', 'R', $(triggerHistoryId),                                                                                                     \n"+
-"                                                $(oldKeys),                                                                                                                                            \n"+
+"                                                $(newKeys),                                                                                                                                            \n"+
 "                                                $(channelExpression),                                                                                                                                  \n"+
 "                                                $(txIdExpression),                                                                                                                                     \n"+
 "                                                $(sourceNodeExpression),                                                                                                                               \n"+

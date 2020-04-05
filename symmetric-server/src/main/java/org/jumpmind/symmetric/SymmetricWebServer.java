@@ -33,7 +33,6 @@ import javax.servlet.ServletContext;
 import javax.websocket.server.ServerContainer;
 import javax.websocket.server.ServerEndpointConfig;
 
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.ClassUtils;
 import org.apache.commons.lang.StringUtils;
 import org.eclipse.jetty.http.HttpVersion;
@@ -63,6 +62,7 @@ import org.jumpmind.security.SecurityServiceFactory.SecurityServiceType;
 import org.jumpmind.symmetric.common.ServerConstants;
 import org.jumpmind.symmetric.common.SystemConstants;
 import org.jumpmind.symmetric.transport.TransportManagerFactory;
+import org.jumpmind.symmetric.util.SymmetricUtils;
 import org.jumpmind.symmetric.web.HttpMethodFilter;
 import org.jumpmind.symmetric.web.ServletUtils;
 import org.jumpmind.symmetric.web.SymmetricEngineHolder;
@@ -243,7 +243,7 @@ public class SymmetricWebServer {
 
     public SymmetricWebServer start(int httpPort, int securePort, int httpJmxPort, Mode mode) throws Exception {
         
-        printAsciiArt();
+        SymmetricUtils.logNotices();
 
         TransportManagerFactory.initHttps(httpSslVerifiedServerNames, allowSelfSignedCerts);
 
@@ -259,6 +259,11 @@ public class SymmetricWebServer {
         webapp = new WebAppContext();
         webapp.setParentLoaderPriority(true);
         webapp.setConfigurationDiscovered(true);
+        
+        if (System.getProperty("symmetric.server.web.home") != null) {
+            webHome = System.getProperty("symmetric.server.web.home");
+        }        
+        
         webapp.setContextPath(webHome);
         webapp.setWar(webAppDir);
         webapp.setResourceBase(webAppDir);
@@ -283,7 +288,10 @@ public class SymmetricWebServer {
                     .setInitParameter(WebConstants.INIT_PARAM_MULTI_SERVER_MODE, Boolean.toString(true));
         }
         
+        webapp.getSessionHandler().getSessionCookieConfig().setName("JSESSIONID_" + (httpsPort > 0 && httpsEnabled ? httpsPort : "") + (httpEnabled && httpPort > 0 ? "_" + httpPort : ""));        
+        
         server.setHandler(webapp);
+
 
         Class<?> remoteStatusEndpoint = loadRemoteStatusEndpoint();
         if (remoteStatusEndpoint != null) {            
@@ -291,7 +299,10 @@ public class SymmetricWebServer {
             container.setDefaultMaxBinaryMessageBufferSize(Integer.MAX_VALUE);
             container.setDefaultMaxTextMessageBufferSize(Integer.MAX_VALUE);
             ServerEndpointConfig websocketConfig = ServerEndpointConfig.Builder.create(remoteStatusEndpoint, "/control").build();
-            container.addEndpoint(websocketConfig);        
+            container.addEndpoint(websocketConfig);
+            if (allowSelfSignedCerts) {
+                System.setProperty("org.eclipse.jetty.websocket.jsr356.ssl-trust-all", "true");
+            }
         }
 
         server.start();
@@ -306,14 +317,6 @@ public class SymmetricWebServer {
         }
 
         return this;
-    }
-
-    protected void printAsciiArt() {
-        try {            
-            log.info("SymmetricWebServer START\r\n{}", IOUtils.toString(Thread.currentThread().getContextClassLoader().getResource("symmetricds.asciiart")));
-        } catch (Exception ex) {
-            // ignored.
-        }
     }
 
     protected ServletContext getServletContext() {
@@ -630,10 +633,12 @@ public class SymmetricWebServer {
         try {            
             Class<?> clazz = ClassUtils.getClass("com.jumpmind.symmetric.console.remote.ServerEndpoint");
             return clazz;
+        } catch (ClassNotFoundException ex) {
+            // ServerEndpoint not found. This is an expected condition.
         } catch (Exception ex) {
             log.debug("Failed to load remote status endpoint.", ex);
-            return null;
         }
+        return null;
     }
 
 }

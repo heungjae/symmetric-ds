@@ -44,7 +44,7 @@ public class OutgoingBatchServiceSqlMap extends AbstractSqlMap {
                 "update $(outgoing_batch) set ignore_count=1, status='OK', error_flag=0, last_update_time=current_timestamp where load_id=?");
 
         putSql("cancelChannelBatchesSelectSql",
-                "select node_id, batch_id from sym_outgoing_batch where channel_id = ? and status <> ? and summary=? and sent_count=0");
+                "select node_id, batch_id from $(outgoing_batch) where channel_id = ? and status <> ? and summary=? and sent_count=0");
 
         putSql("cancelChannelBatchSql",
                 "update $(outgoing_batch) set ignore_count=1, status='OK', error_flag=0, last_update_time=current_timestamp where node_id = ? and batch_id = ?");
@@ -65,7 +65,8 @@ public class OutgoingBatchServiceSqlMap extends AbstractSqlMap {
                         + "  failed_data_id=?, last_update_hostname=?, last_update_time=current_timestamp, summary=?, "
                         + "  load_row_count=?, load_insert_row_count=?, load_update_row_count=?, load_delete_row_count=?, "
                         + "  fallback_insert_count=?, fallback_update_count=?, ignore_row_count=?, missing_delete_count=?, "
-                        + "  skip_count=?, extract_row_count=?, extract_insert_row_count=?, extract_update_row_count=?, extract_delete_row_count=? "
+                        + "  skip_count=?, extract_row_count=?, extract_insert_row_count=?, extract_update_row_count=?, extract_delete_row_count=?, "
+                        + "  transform_extract_millis=?, transform_load_millis=? "
                         + "  where batch_id=? and node_id=?                    ");
         
         putSql("updateCommonBatchExtractStatsSql",

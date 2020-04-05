@@ -36,9 +36,11 @@ import java.util.Map;
 import org.apache.commons.lang.StringUtils;
 import org.jumpmind.db.platform.IDatabasePlatform;
 import org.jumpmind.extension.IBuiltInExtensionPoint;
+import org.jumpmind.symmetric.SymmetricException;
 import org.jumpmind.symmetric.common.Constants;
 import org.jumpmind.symmetric.common.ParameterConstants;
 import org.jumpmind.symmetric.io.data.DataContext;
+import org.jumpmind.symmetric.io.data.DataEventType;
 import org.jumpmind.symmetric.model.Data;
 import org.jumpmind.symmetric.service.IParameterService;
 import org.jumpmind.util.Context;
@@ -105,6 +107,12 @@ public class BshColumnTransform implements ISingleNewAndOldValueColumnTransform,
             }
            
             String transformExpression = column.getTransformExpression();
+            
+            if (StringUtils.isEmpty(transformExpression)) {
+                throw new SymmetricException("transformExpression cannot be empty. Check "
+                        + "configuration for transform '" + column.getTransformId() + "'");
+            }
+            
             String globalScript = parameterService.getString(ParameterConstants.BSH_TRANSFORM_GLOBAL_SCRIPT);
             String methodName = String.format("transform_%d()",
                     Math.abs(transformExpression.hashCode() + (globalScript == null ? 0 : globalScript.hashCode())));
@@ -144,7 +152,11 @@ public class BshColumnTransform implements ISingleNewAndOldValueColumnTransform,
             }
             
             if (result instanceof String) {
-            	return new NewAndOldValue((String) result, null);
+                if (data.getTargetDmlType().equals(DataEventType.DELETE)) {
+                    return new NewAndOldValue(null, (String) result);
+                } else {
+                    return new NewAndOldValue((String) result, null);
+                }
             } else if (result instanceof NewAndOldValue) {
                 return (NewAndOldValue) result;
             } else if (result != null) {

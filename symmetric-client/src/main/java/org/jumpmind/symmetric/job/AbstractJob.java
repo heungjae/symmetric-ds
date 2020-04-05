@@ -25,6 +25,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang.math.NumberUtils;
 import org.jumpmind.symmetric.ISymmetricEngine;
 import org.jumpmind.symmetric.SymmetricException;
 import org.jumpmind.symmetric.common.Constants;
@@ -201,16 +202,17 @@ abstract public class AbstractJob implements Runnable, IJob {
 
     @Override
     public boolean invoke(boolean force) {
-        IParameterService parameterService = engine.getParameterService();
-        long recordStatisticsCountThreshold = parameterService.getLong(ParameterConstants.STATISTIC_RECORD_COUNT_THRESHOLD,-1);
-        
-        boolean ok = checkPrerequsites(force);
-        if (!ok) {
-            return false;
-        }
-
-        try {
+        try {            
             MDC.put("engineName", engine.getEngineName());
+            
+            IParameterService parameterService = engine.getParameterService();
+            long recordStatisticsCountThreshold = parameterService.getLong(ParameterConstants.STATISTIC_RECORD_COUNT_THRESHOLD,-1);
+            
+            boolean ok = checkPrerequsites(force);
+            if (!ok) {
+                return false;
+            }
+            
             long startTime = System.currentTimeMillis();
             try {
                 if (!running.compareAndSet(false, true)) { // This ensures this job only runs once on this instance.
@@ -274,6 +276,15 @@ abstract public class AbstractJob implements Runnable, IJob {
                 log.info("Did not run the '{}' job because the engine is not registered.", getName());
                 hasNotRegisteredMessageBeenLogged = true;
             }
+        }
+
+        if (jobDefinition.getNodeGroupId() != null 
+                && !jobDefinition.getNodeGroupId().equals("ALL") 
+                && !jobDefinition.getNodeGroupId().equals(engine.getNodeService().findIdentity().getNodeGroupId())){
+            log.info("Job should be only run on node groups '{}' but this is '{}'", 
+                    jobDefinition.getNodeGroupId(), 
+                    engine.getNodeService().findIdentity().getNodeGroupId());
+            return false;
         }
 
         return true;
@@ -389,12 +400,12 @@ abstract public class AbstractJob implements Runnable, IJob {
     }
     
     public boolean isCronSchedule() {
-        String cronSchedule = parameterService.getString(jobDefinition.getCronParameter());
-        return !StringUtils.isEmpty(cronSchedule);
+        return !isPeriodicSchedule();
     }
     
     public boolean isPeriodicSchedule() {
-        return !isCronSchedule();
+        String schedule = getSchedule();
+        return NumberUtils.isDigits(schedule);
     }
     
     public String getSchedule() {

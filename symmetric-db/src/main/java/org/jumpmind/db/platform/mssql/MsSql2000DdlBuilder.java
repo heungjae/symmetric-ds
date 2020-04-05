@@ -72,6 +72,7 @@ import org.jumpmind.db.model.ForeignKey;
 import org.jumpmind.db.model.IIndex;
 import org.jumpmind.db.model.Table;
 import org.jumpmind.db.model.TypeMap;
+import org.jumpmind.db.model.ForeignKey.ForeignKeyAction;
 import org.jumpmind.db.platform.AbstractDdlBuilder;
 import org.jumpmind.db.platform.DatabaseNamesConstants;
 import org.jumpmind.db.platform.PlatformUtils;
@@ -87,11 +88,6 @@ public class MsSql2000DdlBuilder extends AbstractDdlBuilder {
     /* We use a generic date format. */
     private DateFormat _genericTimeFormat = new SimpleDateFormat("HH:mm:ss");
 
-    public MsSql2000DdlBuilder(String databaseName) {
-        super(databaseName);
-        setup();
-    }
-    
     public MsSql2000DdlBuilder() {
         super(DatabaseNamesConstants.MSSQL2000);
         setup();
@@ -265,23 +261,9 @@ public class MsSql2000DdlBuilder extends AbstractDdlBuilder {
     @Override
     protected void writeColumnAutoIncrementStmt(Table table, Column column, StringBuilder ddl) {
         ddl.append("IDENTITY (1,1) ");
-    }
+	}
 
-    @Override
-    public void writeExternalIndexDropStmt(Table table, IIndex index, StringBuilder ddl) {
-        String prefix = Table.getFullyQualifiedTablePrefix(table.getCatalog(), table.getSchema(), 
-                delimitedIdentifierModeOn? databaseInfo.getDelimiterToken() : "", databaseInfo.getCatalogSeparator(), 
-                        databaseInfo.getSchemaSeparator());
-        ddl.append(prefix);
-        ddl.append("sp_executesql N'DROP INDEX ");
-        printIdentifier(getIndexName(index), ddl);
-        ddl.append(" ON ");
-        ddl.append(getDelimitedIdentifier(table.getName()));
-        ddl.append("'");
-        printEndOfStatement(ddl);
-    }
-
-    @Override
+	@Override
     protected void writeExternalForeignKeyDropStmt(Table table, ForeignKey foreignKey,
             StringBuilder ddl) {
         String constraintName = getForeignKeyName(table, foreignKey);
@@ -772,5 +754,27 @@ public class MsSql2000DdlBuilder extends AbstractDdlBuilder {
             sqlType.setLength(0);
             sqlType.append("nvarbinary(max)");            
         }
+    }
+    
+    @Override
+    protected void writeCascadeAttributesForForeignKeyUpdate(ForeignKey key, StringBuilder ddl) {
+        // MSSQL does not support ON UPDATE RESTRICT, but RESTRICT is just like NOACTION
+        ForeignKeyAction original = key.getOnUpdateAction();
+        if(key.getOnUpdateAction().equals(ForeignKeyAction.RESTRICT)) {
+            key.setOnUpdateAction(ForeignKeyAction.NOACTION);
+        }
+        super.writeCascadeAttributesForForeignKeyUpdate(key, ddl);
+        key.setOnUpdateAction(original);
+    }
+    
+    @Override
+    protected void writeCascadeAttributesForForeignKeyDelete(ForeignKey key, StringBuilder ddl) {
+        // MSSQL does not support ON DELETE RESTRICT, but RESTRICT is just like NOACTION
+        ForeignKeyAction original = key.getOnDeleteAction();
+        if(key.getOnDeleteAction().equals(ForeignKeyAction.RESTRICT)) {
+            key.setOnDeleteAction(ForeignKeyAction.NOACTION);
+        }
+        super.writeCascadeAttributesForForeignKeyDelete(key, ddl);
+        key.setOnDeleteAction(original);
     }
 }

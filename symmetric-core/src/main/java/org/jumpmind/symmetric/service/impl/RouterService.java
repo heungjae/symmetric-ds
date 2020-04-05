@@ -49,9 +49,9 @@ import org.jumpmind.symmetric.common.Constants;
 import org.jumpmind.symmetric.common.ContextConstants;
 import org.jumpmind.symmetric.common.ParameterConstants;
 import org.jumpmind.symmetric.io.data.DataEventType;
-import org.jumpmind.symmetric.model.AbstractBatch.Status;
 import org.jumpmind.symmetric.load.DefaultReloadGenerator;
 import org.jumpmind.symmetric.load.IReloadGenerator;
+import org.jumpmind.symmetric.model.AbstractBatch.Status;
 import org.jumpmind.symmetric.model.Channel;
 import org.jumpmind.symmetric.model.Data;
 import org.jumpmind.symmetric.model.DataGap;
@@ -92,6 +92,7 @@ import org.jumpmind.symmetric.route.LookupTableDataRouter;
 import org.jumpmind.symmetric.route.NonTransactionalBatchAlgorithm;
 import org.jumpmind.symmetric.route.SimpleRouterContext;
 import org.jumpmind.symmetric.route.SubSelectDataRouter;
+import org.jumpmind.symmetric.route.TPSRouter;
 import org.jumpmind.symmetric.route.TransactionalBatchAlgorithm;
 import org.jumpmind.symmetric.service.ClusterConstants;
 import org.jumpmind.symmetric.service.IConfigurationService;
@@ -107,6 +108,8 @@ import org.jumpmind.util.FormatUtils;
  * @see IRouterService
  */
 public class RouterService extends AbstractService implements IRouterService {
+    
+    public static final int MAX_LOGGING_LENGTH = 512;
 
     protected Map<String, Boolean> commonBatchesLastKnownState = new HashMap<String, Boolean>();
     
@@ -148,6 +151,7 @@ public class RouterService extends AbstractService implements IRouterService {
                 engine.getSymmetricDialect()));
         extensionService.addExtensionPoint(FileSyncDataRouter.ROUTER_TYPE, new FileSyncDataRouter(engine));
         extensionService.addExtensionPoint("dbf", new DBFRouter(engine));
+        extensionService.addExtensionPoint("tps", new TPSRouter(engine));
 
         extensionService.addExtensionPoint("csv", new CSVRouter(engine));
         extensionService.addExtensionPoint(DefaultReloadGenerator.NAME, new DefaultReloadGenerator(engine));
@@ -345,38 +349,46 @@ public class RouterService extends AbstractService implements IRouterService {
             log.info("Found " + loadsToProcess.size() + " table reload requests to process.");
             gapDetector.setFullGapAnalysis(true);
             
+            boolean useExtractJob = parameterService.is(ParameterConstants.INITIAL_LOAD_USE_EXTRACT_JOB, true);
+            boolean streamToFile = parameterService.is(ParameterConstants.STREAM_TO_FILE_ENABLED, false);
+
             Map<String, List<TableReloadRequest>> requestsSplitByLoad = new HashMap<String, List<TableReloadRequest>>();
             for (TableReloadRequest load : loadsToProcess) {
                 Node targetNode = engine.getNodeService().findNode(load.getTargetNodeId());
-                
-                if (load.isFullLoadRequest() && isValidLoadTarget(load.getTargetNodeId())) {
-                   List<TableReloadRequest> fullLoad = new ArrayList<TableReloadRequest>();
-                   fullLoad.add(load);
-               
-                   List<TriggerRouter> triggerRouters = engine.getTriggerRouterService()
-                           .getAllTriggerRoutersForReloadForCurrentNode(parameterService.getNodeGroupId(), targetNode.getNodeGroupId());
-                    
-                   List<TriggerHistory> activeHistories = extensionService.getExtensionPoint(IReloadGenerator.class).getActiveTriggerHistories(targetNode);
+                if (!useExtractJob || streamToFile) {
+                    if (load.isFullLoadRequest() && isValidLoadTarget(load.getTargetNodeId())) {
+                        List<TableReloadRequest> fullLoad = new ArrayList<TableReloadRequest>();
+                        fullLoad.add(load);
 
-                   engine.getDataService().insertReloadEvents(
-                           targetNode,false, fullLoad, processInfo, activeHistories, triggerRouters);
-               }
-               else {
-                   NodeSecurity targetNodeSecurity = engine.getNodeService().findNodeSecurity(load.getTargetNodeId());
-                   
-                   boolean registered = targetNodeSecurity != null  && (targetNodeSecurity.getRegistrationTime() != null 
-                   		|| targetNodeSecurity.getNodeId().equals(targetNodeSecurity.getCreatedAtNodeId()));
-                   if (registered) {  
-                       // Make loads unique to the target and create time
-                       String key = load.getTargetNodeId() + "::" + load.getCreateTime().toString();
-                       if (!requestsSplitByLoad.containsKey(key)) {
-                           requestsSplitByLoad.put(key, new ArrayList<TableReloadRequest>());
-                       }
-                       requestsSplitByLoad.get(key).add(load);
-                   } else {
-                       log.warn("There was a load queued up for '{}', but the node is not registered.  It is being ignored", load.getTargetNodeId());
-                   }
-               }
+                        List<TriggerRouter> triggerRouters = engine.getTriggerRouterService()
+                                .getAllTriggerRoutersForReloadForCurrentNode(parameterService.getNodeGroupId(), targetNode.getNodeGroupId());
+
+                        List<TriggerHistory> activeHistories = extensionService.getExtensionPoint(IReloadGenerator.class)
+                                .getActiveTriggerHistories(targetNode);
+
+                        engine.getDataService().insertReloadEvents(targetNode, false, fullLoad, processInfo, activeHistories, triggerRouters);
+                    } else {
+                        NodeSecurity targetNodeSecurity = engine.getNodeService().findNodeSecurity(load.getTargetNodeId());
+
+                        boolean registered = targetNodeSecurity != null && (targetNodeSecurity.getRegistrationTime() != null
+                                || targetNodeSecurity.getNodeId().equals(targetNodeSecurity.getCreatedAtNodeId()));
+                        if (registered) {
+                            // Make loads unique to the target and create time
+                            String key = load.getTargetNodeId() + "::" + load.getCreateTime().toString();
+                            if (!requestsSplitByLoad.containsKey(key)) {
+                                requestsSplitByLoad.put(key, new ArrayList<TableReloadRequest>());
+                            }
+                            requestsSplitByLoad.get(key).add(load);
+                        } else {
+                            log.warn("There was a load queued up for '{}', but the node is not registered.  It is being ignored",
+                                    load.getTargetNodeId());
+                        }
+                    }
+                } else {
+                    throw new SymmetricException(String.format("Node '%s' can't process load for '%s' because of confilcting parameters: %s=%s and %s=%s", 
+                            source.getNodeId(), load.getTargetNodeId(), ParameterConstants.INITIAL_LOAD_USE_EXTRACT_JOB, useExtractJob, ParameterConstants.STREAM_TO_FILE_ENABLED,
+                            streamToFile));
+                }
             }
             
             for (Map.Entry<String, List<TableReloadRequest>> entry : requestsSplitByLoad.entrySet()) {
@@ -393,8 +405,6 @@ public class RouterService extends AbstractService implements IRouterService {
                         targetNode,
                         false, entry.getValue(), processInfo, activeHistories, triggerRouters);
             }
-            
-            
         }
     }
     public boolean isValidLoadTarget(String targetNodeId) {
@@ -492,12 +502,10 @@ public class RouterService extends AbstractService implements IRouterService {
                 if (nodeChannel.isEnabled() && (readyChannels == null || readyChannels.contains(nodeChannel.getChannelId()))) {
                     processInfo.setCurrentChannelId(nodeChannel.getChannelId());
                     dataCount += routeDataForChannel(processInfo, nodeChannel, sourceNode);
-                } else {
+                } else if (!nodeChannel.isEnabled()) {
                     gapDetector.setIsAllDataRead(false);
                     if (log.isDebugEnabled()) {
-                        log.debug(
-                                "Not routing the {} channel.  It is either disabled or suspended.",
-                                nodeChannel.getChannelId());
+                        log.debug("Not routing the {} channel.  It is either disabled or suspended.", nodeChannel.getChannelId());                            
                     }
                 }
             }
@@ -581,12 +589,14 @@ public class RouterService extends AbstractService implements IRouterService {
             if (producesCommonBatches && triggerRouters != null) {
                 List<TriggerRouter> testableTriggerRouters = new ArrayList<TriggerRouter>();
                 for (TriggerRouter triggerRouter : triggerRouters) {
-                    if (triggerRouter.getTrigger().getChannelId().equals(channel.getChannelId())) {
+                    if (triggerRouter.getTrigger().getChannelId().equals(channelId)) {
                         testableTriggerRouters.add(triggerRouter);
                     } else {
                         /*
-                         * Add any trigger router that is in another channel, but is
-                         * for a table that is in the current channel
+                         * This trigger is not on this channel. If there is
+                         * another trigger on this channel for the same table
+                         * AND this trigger is syncing to this node, then
+                         * consider it to check on common batch mode
                          */
                         String anotherChannelTableName = triggerRouter.getTrigger()
                                 .getFullyQualifiedSourceTableName();
@@ -595,14 +605,16 @@ public class RouterService extends AbstractService implements IRouterService {
                                     .getTrigger()
                                     .getFullyQualifiedSourceTableName();
                             String currentChannelId = triggerRouter2.getTrigger().getChannelId();
-                            if (anotherChannelTableName
-                                    .equals(currentTableName) && currentChannelId.equals(channelId)) {
+                            if (anotherChannelTableName.equals(currentTableName) && currentChannelId.equals(channelId)
+                                    && triggerRouter.getRouter().getNodeGroupLink().getTargetNodeGroupId()
+                                            .equals(triggerRouter2.getRouter().getNodeGroupLink().getSourceNodeGroupId()) &&
+                                            triggerRouter.getRouter().getNodeGroupLink().getSourceNodeGroupId()
+                                            .equals(triggerRouter2.getRouter().getNodeGroupLink().getTargetNodeGroupId())) {
                                 testableTriggerRouters.add(triggerRouter);
                             }
                         }
                     }
                 }         
-                
                 for (TriggerRouter triggerRouter : testableTriggerRouters) {
                     boolean isDefaultRouter = "default".equals(triggerRouter.getRouter().getRouterType());
                     /*
@@ -626,9 +638,7 @@ public class RouterService extends AbstractService implements IRouterService {
                                     String incomingTableName = triggerRouter2.getTrigger().getFullyQualifiedSourceTableName();
                                     String targetNodeGroupId = triggerRouter2.getRouter().getNodeGroupLink()
                                             .getTargetNodeGroupId();
-                                    if (incomingTableName
-                                            .equals(outgoingTableName)
-                                            && targetNodeGroupId.equals(nodeGroupId)) {
+                                    if (incomingTableName.equals(outgoingTableName) && targetNodeGroupId.equals(nodeGroupId)) {
                                         producesCommonBatches = false;
                                         break;
                                     }
@@ -759,6 +769,8 @@ public class RouterService extends AbstractService implements IRouterService {
                             engine.getStatisticManager().setDataUnRouted(channelId, dataLeftToRoute);
                         }
                     }
+                } else {
+                    gapDetector.setIsAllDataRead(false);
                 }
             } catch (Exception e) {
                 if (context != null) {
@@ -786,7 +798,7 @@ public class RouterService extends AbstractService implements IRouterService {
         if (engine.getParameterService().is(ParameterConstants.ROUTING_LOG_STATS_ON_BATCH_ERROR)) {
             engine.getStatisticManager().addRouterStats(context.getStartDataId(), context.getEndDataId(), 
                     context.getDataReadCount(), context.getPeekAheadFillCount(),
-                    context.getDataGaps(), context.getTransactions(), batches);
+                    context.getDataGaps(), null, batches);
         }
 
         for (OutgoingBatch batch : batches) {
@@ -938,10 +950,11 @@ public class RouterService extends AbstractService implements IRouterService {
                             engine.getClusterService().refreshLock(ClusterConstants.ROUTE);
                             log.info(
                                     "Routing for channel '{}' has been processing for {} seconds. The following stats have been gathered: "
-                                            + "totalDataRoutedCount={}, totalDataEventCount={}, startDataId={}, endDataId={}, dataReadCount={}, peekAheadFillCount={}, transactions={}, dataGaps={}",
+                                            + "totalDataRoutedCount={}, totalDataEventCount={}, startDataId={}, endDataId={}, dataReadCount={}, peekAheadFillCount={}, dataGaps={}",
                                     new Object[] {  context.getChannel().getChannelId(), ((System.currentTimeMillis()-startTime) / 1000), totalDataCount, totalDataEventCount, context.getStartDataId(),
-                                            context.getEndDataId(), context.getDataReadCount(), context.getPeekAheadFillCount(),
-                                            context.getTransactions().toString(), context.getDataGaps().toString() });
+                                            context.getEndDataId(), context.getDataReadCount(), context.getPeekAheadFillCount(), 
+                                            StringUtils.abbreviate(context.getDataGaps().toString(), MAX_LOGGING_LENGTH)
+                                            });
                             ts = System.currentTimeMillis();
                         }
 
@@ -1099,6 +1112,9 @@ public class RouterService extends AbstractService implements IRouterService {
                         context.setLastLoadId(loadId);
                     }
                     batch.setLoadId(loadId);
+                    if (context.getChannel().isReloadFlag()) {
+                        context.setNeedsCommitted(true);
+                    }
                 } else {
                     context.setLastLoadId(-1);
                 }
@@ -1194,6 +1210,10 @@ public class RouterService extends AbstractService implements IRouterService {
 
     public Map<String, IDataRouter> getRouters() {
         return extensionService.getExtensionPointMap(IDataRouter.class);
+    }
+
+    public List<DataGap> getDataGaps() {
+        return gapDetector.getDataGaps();
     }
 
     protected Table buildTableFromTriggerHistory(TriggerHistory triggerHistory) {

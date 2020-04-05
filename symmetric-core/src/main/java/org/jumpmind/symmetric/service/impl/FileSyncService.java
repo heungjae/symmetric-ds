@@ -146,6 +146,10 @@ INodeCommunicationExecutor {
                     try {
                         log.debug("Tracking changes for file sync");
                         Node local = engine.getNodeService().findIdentity();
+                        if (local == null) {
+                            log.warn("Not running file sync trackChanges because the local node is not available yet.  It may not be registered yet.");
+                            return;
+                        }
                         ProcessInfo processInfo = engine.getStatisticManager().newProcessInfo(
                                 new ProcessInfoKey(local.getNodeId(), null, ProcessType.FILE_SYNC_TRACKER));
                         boolean useCrc = engine.getParameterService().is(ParameterConstants.FILE_SYNC_USE_CRC);
@@ -393,7 +397,7 @@ INodeCommunicationExecutor {
                 new Object[] { fileTriggerRouter.isEnabled() ? 1 : 0,
                         fileTriggerRouter.isInitialLoadEnabled() ? 1 : 0,
                                 fileTriggerRouter.getTargetBaseDir(),
-                                fileTriggerRouter.getConflictStrategy().name(),
+                                fileTriggerRouter.getConflictStrategyString(),
                                 fileTriggerRouter.getLastUpdateBy(), fileTriggerRouter.getLastUpdateTime(),
                                 fileTriggerRouter.getFileTrigger().getTriggerId(),
                                 fileTriggerRouter.getRouter().getRouterId() }, new int[] { Types.SMALLINT,
@@ -405,7 +409,7 @@ INodeCommunicationExecutor {
                     new Object[] { fileTriggerRouter.isEnabled() ? 1 : 0,
                             fileTriggerRouter.isInitialLoadEnabled() ? 1 : 0,
                                     fileTriggerRouter.getTargetBaseDir(),
-                                    fileTriggerRouter.getConflictStrategy().name(),
+                                    fileTriggerRouter.getConflictStrategyString(),
                                     fileTriggerRouter.getCreateTime(), fileTriggerRouter.getLastUpdateBy(),
                                     fileTriggerRouter.getLastUpdateTime(),
                                     fileTriggerRouter.getFileTrigger().getTriggerId(),
@@ -588,7 +592,7 @@ INodeCommunicationExecutor {
                                     Constants.STAGING_CATEGORY_OUTGOING, processInfo.getSourceNodeId(),
                                     targetNode.getNodeId(), "filesync.zip");                            
                             dataWriter = new FileSyncZipDataWriter(maxBytesToSync, this,
-                                    engine.getNodeService(), stagedResource);
+                                    engine.getNodeService(), stagedResource, engine.getExtensionService(), engine.getConfigurationService());
                         }
                         log.debug("Extracting batch {} for filesync.", currentBatch.getNodeBatchId());
 
@@ -1223,8 +1227,14 @@ INodeCommunicationExecutor {
             String triggerId = rs.getString("trigger_id");
             FileTrigger fileTrigger = getFileTrigger(triggerId);
             fileTriggerRouter.setFileTrigger(fileTrigger);
-            fileTriggerRouter.setConflictStrategy(FileConflictStrategy.valueOf(rs.getString(
+            try {
+                fileTriggerRouter.setConflictStrategy(FileConflictStrategy.valueOf(rs.getString(
                     "conflict_strategy").toUpperCase()));
+            }
+            catch (Exception e) {
+            }
+            fileTriggerRouter.setConflictStrategyString(rs.getString(
+                            "conflict_strategy").toUpperCase());
             fileTriggerRouter.setCreateTime(rs.getDateTime("create_time"));
             fileTriggerRouter.setLastUpdateBy(rs.getString("last_update_by"));
             fileTriggerRouter.setLastUpdateTime(rs.getDateTime("last_update_time"));
@@ -1238,7 +1248,7 @@ INodeCommunicationExecutor {
         }
     }
 
-    class FileSnapshotMapper implements ISqlRowMapper<FileSnapshot> {
+    static class FileSnapshotMapper implements ISqlRowMapper<FileSnapshot> {
         public FileSnapshot mapRow(Row rs) {
             FileSnapshot fileSnapshot = new FileSnapshot();
             fileSnapshot.setCrc32Checksum(rs.getLong("crc32_checksum"));

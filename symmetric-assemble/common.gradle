@@ -24,6 +24,7 @@ allprojects {
         mavenCentral()
         maven { url "http://maven.vaadin.com/vaadin-addons" }
         maven { url 'https://plugins.gradle.org/m2' }
+        maven { url "http://packages.confluent.io/maven/" }
     }
         
     ext {
@@ -162,21 +163,21 @@ subprojects { subproject ->
     artifacts { testArtifacts testJar }
 
     ext {
-        bshVersion = '2.0b5'
-        commonsBeanUtilsVersion = '1.9.3'
-        commonsCliVersion = '1.2'
-        commonsDbcpVersion = '1.3'
-        commonsFileuploadVersion = '1.3.3'
-        commonsIoVersion = '2.4'
+        bshVersion = '2.0b6'
+        commonsBeanUtilsVersion = '1.9.4'
+        commonsCliVersion = '1.4'
+        commonsDbcpVersion = '1.4'
+        commonsFileuploadVersion = '1.4'
+        commonsIoVersion = '2.6'
         commonsLangVersion = '2.6'
-        commonsNetVersion = '3.3'
-        commonsCodecVersion = '1.3'
+        commonsNetVersion = '3.6'
+        commonsCodecVersion = '1.12'
         commonsCollectionVersion = '3.2.2'
         hamcrestVersion = '1.3'
         h2Version = '1.3.176'
         derbyVersion = '10.10.2.0'
         mariaDbVersion = '1.1.7'
-        postgresqlVersion = '9.4-1212.jre7'
+        postgresqlVersion =  '42.2.1'
         hsqldbVersion = '2.3.2'
         sqliteVersion = '3.8.7'
         firebirdVersion = '2.1.6'
@@ -185,15 +186,15 @@ subprojects { subproject ->
         jdomVersion = '2.0.5'
         junitVersion = '4.11'
         log4jVersion = '1.2.17'
-        slf4jVersion = '1.7.21'
+        slf4jVersion = '1.7.26'
         mockitoVersion = '1.9.5'
         powerMockVersion = '1.5.3'
-        mysqlVersion = '5.1.30'
+        mysqlVersion = '5.1.45'
         servletVersion = '3.1.0'
-        springVersion = '4.3.13.RELEASE'
-        jtdsVersion = '1.2.8'
+        springVersion = '4.3.16.RELEASE'
+        jtdsVersion = '1.3.1'
         voltDbVersion = '6.2'
-        bouncyCastleVersion = '1.58'
+        bouncyCastleVersion = '1.64'
         animalSnifferVersion = '1.10'
         jnaVersion = '4.1.0'
         jettyVersion = project.property('jetty.version')
@@ -213,7 +214,7 @@ subprojects { subproject ->
         provided "org.apache.derby:derbytools:$derbyVersion"
         provided "mysql:mysql-connector-java:$mysqlVersion"
         provided ("org.mariadb.jdbc:mariadb-java-client:$mariaDbVersion") { exclude group: 'net.java.dev.jna' }
-        provided "jdbc.postgresql:postgresql:$postgresqlVersion"
+        provided "org.postgresql:postgresql:$postgresqlVersion"
         provided "jdbc:ojdbc:11.2.0.3"
         provided "net.sourceforge.jtds:jtds:$jtdsVersion"
         provided "org.voltdb:voltdbclient:$voltDbVersion"
@@ -232,8 +233,14 @@ subprojects { subproject ->
         provided "jdbc.tibero:tibero:$tiberoVersion"
         // javax.resource needed by jaybird
         provided "org.apache.geronimo.specs:geronimo-j2ee-connector_1.6_spec:1.0"
-        
-                
+        provided "com.datastax.cassandra:cassandra-driver-core:3.1.4"
+        provided ("nl.cad:tps-parse:1.0.15-SNAPSHOT") {
+        	exclude group: 'commons-lang', module: 'commons-lang'
+        }
+        provided "org.apache.kafka:kafka-clients:1.1.0"
+        provided "org.apache.avro:avro:1.8.2"
+		provided "io.confluent:kafka-avro-serializer:3.2.1"
+		
         testCompile fileTree(dir: System.getProperty("user.home") + '/.symmetricds/lib', include: '*.jar')
         testCompile "junit:junit:$junitVersion"
         testCompile "org.hamcrest:hamcrest-all:$hamcrestVersion"

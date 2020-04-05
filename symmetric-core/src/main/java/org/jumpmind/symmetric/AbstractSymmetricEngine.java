@@ -430,7 +430,7 @@ abstract public class AbstractSymmetricEngine implements ISymmetricEngine {
     }
 
     protected IClusterService createClusterService() {
-        return new ClusterService(parameterService, symmetricDialect, nodeService);
+        return new ClusterService(parameterService, symmetricDialect, nodeService, extensionService);
     }
 
     protected IRouterService buildRouterService() {
@@ -634,6 +634,8 @@ abstract public class AbstractSymmetricEngine implements ISymmetricEngine {
         return start(true);
     }
 
+    private boolean isFirstStart = true;
+
     public synchronized boolean start(boolean startJobs) {
         isInitialized = false;
         if (!starting && !started) {
@@ -643,22 +645,10 @@ abstract public class AbstractSymmetricEngine implements ISymmetricEngine {
                 setup();
                 if (isConfigured()) {
                     Node node = nodeService.findIdentity();
-                    if (node != null && (!node.getExternalId().equals(getParameterService().getExternalId())
-                            || !node.getNodeGroupId().equals(
-                                    getParameterService().getNodeGroupId()))) {
-                        if (parameterService.is(ParameterConstants.NODE_COPY_MODE_ENABLED,
-                                false)) {
-                            registrationService.requestNodeCopy();
-                        } else {
-                            throw new SymmetricException(
-                                    "The configured state does not match recorded database state.  The recorded external id is '%s' while the configured external id is '%s'. The recorded node group id is '%s' while the configured node group id is '%s'",
-                                    new Object[] { node.getExternalId(),
-                                            getParameterService().getExternalId(),
-                                            node.getNodeGroupId(),
-                                            getParameterService().getNodeGroupId() });
-                        }
-                        isInitialized = true;
-                   } else if (node != null) {
+                    checkSystemIntegrity(node);
+                    isInitialized = true;
+                                        
+                     if (node != null) {
                         
                         log.info(
                                 "Starting registered node [group={}, id={}, nodeId={}]",
@@ -703,8 +693,15 @@ abstract public class AbstractSymmetricEngine implements ISymmetricEngine {
                     if (parameterService.isRegistrationServer()) {
                         this.updateService.init();
                     }
+
+                    if(isFirstStart){
+                        isFirstStart = false;
+                    }else{
+                        this.clearCaches();
+                    }
                     
                     lastRestartTime = new Date();
+                    statisticManager.incrementRestart();
                     started = true;
 
                 } else {
@@ -729,6 +726,32 @@ abstract public class AbstractSymmetricEngine implements ISymmetricEngine {
         return started;
     }
     
+    protected void checkSystemIntegrity(Node node) {
+        if (node != null && (!node.getExternalId().equals(getParameterService().getExternalId())
+                || !node.getNodeGroupId().equals(getParameterService().getNodeGroupId()))) {
+            if (parameterService.is(ParameterConstants.NODE_COPY_MODE_ENABLED, false)) {
+                registrationService.requestNodeCopy();
+            } else {
+                throw new SymmetricException(
+                        "The configured state does not match recorded database state.  The recorded external id is '%s' while the configured external id is '%s'. The recorded node group id is '%s' while the configured node group id is '%s'",
+                        new Object[] { node.getExternalId(),
+                                getParameterService().getExternalId(),
+                                node.getNodeGroupId(),
+                                getParameterService().getNodeGroupId() });
+            }
+       }
+        
+		boolean useExtractJob = parameterService.is(ParameterConstants.INITIAL_LOAD_USE_EXTRACT_JOB, true);
+		boolean streamToFile = parameterService.is(ParameterConstants.STREAM_TO_FILE_ENABLED, true);
+		if (useExtractJob && !streamToFile) {
+			throw new SymmetricException(String.format(
+					"Node '%s' is configured with confilcting parameters which may result in replication stopping and/or empty load batches. "
+							+ "One of these two parameters needs to be changed: %s=%s and %s=%s",
+					node != null ? node.getNodeId() : "null", ParameterConstants.INITIAL_LOAD_USE_EXTRACT_JOB,
+					useExtractJob, ParameterConstants.STREAM_TO_FILE_ENABLED, streamToFile));
+		}
+    }
+
     public String getEngineDescription(String msg) {
         if (lastRestartTime == null) {
             return "";
@@ -989,6 +1012,7 @@ abstract public class AbstractSymmetricEngine implements ISymmetricEngine {
     }
     
     public void clearCaches() {
+        getExtensionService().refresh();
         getTriggerRouterService().clearCache();
         getParameterService().rereadParameters();
         getTransformService().clearCache();
@@ -996,7 +1020,13 @@ abstract public class AbstractSymmetricEngine implements ISymmetricEngine {
         getConfigurationService().initDefaultChannels();
         getConfigurationService().clearCache();
         getNodeService().flushNodeAuthorizedCache();
-        getJobManager().startJobsAfterConfigChange();
+        getNodeService().flushNodeCache();
+        getNodeService().flushNodeGroupCache();
+        getJobManager().restartJobs();
+        getLoadFilterService().clearCache();
+        getMonitorService().flushMonitorCache();
+        getMonitorService().flushNotificationCache();
+        getFileSyncService().clearCache();
     }
 
     public void reOpenRegistration(String nodeId) {

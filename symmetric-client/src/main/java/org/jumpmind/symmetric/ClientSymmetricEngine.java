@@ -20,6 +20,7 @@
  */
 package org.jumpmind.symmetric;
 
+import static org.apache.commons.lang.StringUtils.isBlank;
 import static org.apache.commons.lang.StringUtils.isNotBlank;
 
 import java.io.File;
@@ -44,7 +45,9 @@ import org.apache.commons.lang.StringUtils;
 import org.jumpmind.db.platform.DatabaseNamesConstants;
 import org.jumpmind.db.platform.IDatabasePlatform;
 import org.jumpmind.db.platform.JdbcDatabasePlatformFactory;
+import org.jumpmind.db.platform.cassandra.CassandraPlatform;
 import org.jumpmind.db.platform.generic.GenericJdbcDatabasePlatform;
+import org.jumpmind.db.platform.kafka.KafkaPlatform;
 import org.jumpmind.db.sql.JdbcSqlTemplate;
 import org.jumpmind.db.sql.LogSqlBuilder;
 import org.jumpmind.db.sql.SqlTemplateSettings;
@@ -75,6 +78,7 @@ import org.jumpmind.symmetric.statistic.IStatisticManager;
 import org.jumpmind.symmetric.statistic.StatisticManager;
 import org.jumpmind.symmetric.util.LogSummaryAppenderUtils;
 import org.jumpmind.symmetric.util.SnapshotUtil;
+import org.jumpmind.symmetric.util.SymmetricUtils;
 import org.jumpmind.symmetric.util.TypedPropertiesFactory;
 import org.jumpmind.util.AppUtils;
 import org.springframework.beans.factory.config.PropertyPlaceholderConfigurer;
@@ -94,8 +98,6 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
     
     public static final String PROPERTIES_FACTORY_CLASS_NAME = "properties.factory.class.name";
 
-    public static final String LOAD_ONLY_PROPERTY_PREFIX = "target.";
-    
     protected File propertiesFile;
 
     protected Properties properties;
@@ -198,7 +200,10 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
     protected void init() {
         try {
             LogSummaryAppenderUtils.registerLogSummaryAppender();
-
+            
+            if (getSecurityServiceType().equals(SecurityServiceType.CLIENT)) {
+                SymmetricUtils.logNotices();
+            }
             super.init();
 
             this.monitorService = new MonitorService(parameterService, symmetricDialect, nodeService, extensionService, 
@@ -310,6 +315,15 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
             DataSource dataSource, boolean waitOnAvailableDatabase, boolean isLoadOnly) {
         log.info("Initializing connection to database");
         if (dataSource == null) {
+        		if (isLoadOnly) {
+        			String dbUrl = properties.get(BasicDataSourcePropertyConstants.DB_POOL_URL);
+        			String dbDriver = properties.get(BasicDataSourcePropertyConstants.DB_POOL_DRIVER);
+        			if (dbUrl != null && dbUrl.startsWith("cassandra://")) {
+        				return new CassandraPlatform(createSqlTemplateSettings(properties), dbUrl.substring(12));
+        			} else if (dbDriver != null && dbDriver.contains("kafka")) {
+        				return new KafkaPlatform(createSqlTemplateSettings(properties));
+        			}
+        		}
             String jndiName = properties.getProperty(ParameterConstants.DB_JNDI_NAME);
             if (StringUtils.isNotBlank(jndiName)) {
                 try {
@@ -354,9 +368,13 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
         settings.setFetchSize(properties.getInt(ParameterConstants.DB_FETCH_SIZE, 1000));
         settings.setQueryTimeout(properties.getInt(ParameterConstants.DB_QUERY_TIMEOUT_SECS, 300));
         settings.setBatchSize(properties.getInt(ParameterConstants.JDBC_EXECUTE_BATCH_SIZE, 100));
+        settings.setBatchBulkLoaderSize(properties.getInt(ParameterConstants.JDBC_EXECUTE_BULK_BATCH_SIZE, 25));
         settings.setOverrideIsolationLevel(properties.getInt(ParameterConstants.JDBC_ISOLATION_LEVEL, -1));
         settings.setReadStringsAsBytes(properties.is(ParameterConstants.JDBC_READ_STRINGS_AS_BYTES, false));
         settings.setTreatBinaryAsLob(properties.is(ParameterConstants.TREAT_BINARY_AS_LOB_ENABLED, true));
+        settings.setRightTrimCharValues(properties.is(ParameterConstants.RIGHT_TRIM_CHAR_VALUES, false));
+        settings.setAllowUpdatesWithResults(properties.is(ParameterConstants.ALLOW_UPDATES_WITH_RESULTS, false));
+        
         LogSqlBuilder logSqlBuilder = new LogSqlBuilder();
         logSqlBuilder.setLogSlowSqlThresholdMillis(properties.getInt(ParameterConstants.LOG_SLOW_SQL_THRESHOLD_MILLIS, 20000));
         logSqlBuilder.setLogSqlParametersInline(properties.is(ParameterConstants.LOG_SQL_PARAMETERS_INLINE, true));
@@ -380,20 +398,22 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
 
     @Override
     protected IStagingManager createStagingManager() {
-        String directory = parameterService.getTempDirectory();
+        String directory = parameterService.getString(ParameterConstants.STAGING_DIR);
+        if (isBlank(directory)) {
+            directory = parameterService.getTempDirectory();
+        }
         String stagingManagerClassName = parameterService.getString(ParameterConstants.STAGING_MANAGER_CLASS);
         if (stagingManagerClassName != null) {
-        	try {
-        		Constructor<?> cons = Class.forName(stagingManagerClassName).getConstructor(ISymmetricEngine.class, String.class);
-        		return (IStagingManager) cons.newInstance(this, directory);
-        	} catch (Exception e) {
-        		throw new RuntimeException(e);
-        	}
+            try {
+                Constructor<?> cons = Class.forName(stagingManagerClassName).getConstructor(ISymmetricEngine.class, String.class);
+                return (IStagingManager) cons.newInstance(this, directory);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
 
         return new BatchStagingManager(this, directory);
     }
-    
 
     @Override
     protected IStatisticManager createStatisticManager() {
@@ -487,7 +507,7 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
      		
      		TypedProperties properties = new TypedProperties();
 			for (String prop : BasicDataSourcePropertyConstants.allProps ) {
-				properties.put(prop, parameterService.getString(LOAD_ONLY_PROPERTY_PREFIX + prop));
+				properties.put(prop, parameterService.getString(ParameterConstants.LOAD_ONLY_PROPERTY_PREFIX + prop));
 			}
 			
 			String[] sqlTemplateProperties = new String[] {
@@ -501,7 +521,18 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
 				ParameterConstants.LOG_SQL_PARAMETERS_INLINE
 			};
 			for (String prop : sqlTemplateProperties) {
-				properties.put(prop, parameterService.getString(LOAD_ONLY_PROPERTY_PREFIX + prop));
+				properties.put(prop, parameterService.getString(ParameterConstants.LOAD_ONLY_PROPERTY_PREFIX + prop));
+			}
+			
+			String[] kafkaProperties = new String[] {
+				ParameterConstants.KAFKA_PRODUCER,
+				ParameterConstants.KAFKA_MESSAGE_BY,
+				ParameterConstants.KAFKA_TOPIC_BY,
+				ParameterConstants.KAFKA_FORMAT
+			};
+			
+			for (String prop : kafkaProperties) {
+				properties.put(prop, parameterService.getString(prop));
 			}
 
 			IDatabasePlatform targetPlatform = createDatabasePlatform(null, properties, null, true, true);
@@ -521,7 +552,7 @@ public class ClientSymmetricEngine extends AbstractSymmetricEngine {
 			        }
 			    		((GenericJdbcDatabasePlatform) targetPlatform).setName(name);
 			    	}
-			    	targetPlatform.getDatabaseInfo().setNotNullColumnsSupported(parameterService.is(LOAD_ONLY_PROPERTY_PREFIX + ParameterConstants.CREATE_TABLE_NOT_NULL_COLUMNS, true));
+			    	targetPlatform.getDatabaseInfo().setNotNullColumnsSupported(parameterService.is(ParameterConstants.LOAD_ONLY_PROPERTY_PREFIX + ParameterConstants.CREATE_TABLE_NOT_NULL_COLUMNS, true));
 		    }
 		    getSymmetricDialect().setTargetPlatform(targetPlatform);
 		}

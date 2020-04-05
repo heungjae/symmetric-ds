@@ -29,7 +29,6 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -224,7 +223,7 @@ public class DbFill {
             }
         }
         log.info("TABLES " + tables.size());
-        tables = Database.sortByForeignKeys(tables, getAllDbTables(), null, null, null);
+        tables = Database.sortByForeignKeys(tables, getAllDbTables(), null, null);
         
         StringBuffer tableOrder = new StringBuffer();
         for(Table t : tables) {
@@ -232,8 +231,21 @@ public class DbFill {
         }
         log.info("ORDER (" + tables.size() + " tables): " + tableOrder.toString());
         buildForeignKeyReferences(tables);
-        buildDependentColumnValues(tables);        
+        buildDependentColumnValues(tables);    
+        
+        tables = removeSymTables(tables);
+        
         fillTables(tables, tableProperties);
+    }
+    
+    protected List<Table> removeSymTables(List<Table> tables) {
+    		List<Table> filteredTables = new ArrayList<Table>();
+    		for (Table table : tables) {
+    			if (!table.getNameLowerCase().startsWith("sym_")) {
+    				filteredTables.add(table);
+    			}
+    		}
+    		return filteredTables;
     }
     
     protected void buildForeignTables(List<Table> tables) {
@@ -784,15 +796,23 @@ public class DbFill {
         } else if (type == Types.ARRAY) {
             objectValue = null;
         } else if (type == Types.VARCHAR || type == Types.LONGVARCHAR || type == Types.CHAR || type == Types.CLOB) {
-            int size = 0;
-            // Assume if the size is 0 there is no max size configured.
-            if (column.getSizeAsInt() != 0) {
-                size = column.getSizeAsInt()>50?50:column.getSizeAsInt();
-            } else {
-                // No max length so default to 50
-                size = 50;
+        		if (column.getJdbcTypeName() != null && (column.getJdbcTypeName().equals("JSON") || column.getJdbcTypeName().equals("jsonb"))) {
+        			objectValue = "{\"jumpmind\":\"symmetricds\"}";
+        		}
+        		else if ("UUID".equalsIgnoreCase(column.getJdbcTypeName())) {
+                objectValue = randomUUID();
             }
-            objectValue = randomString(size);
+        		else {
+	            int size = 0;
+	            // Assume if the size is 0 there is no max size configured.
+	            if (column.getSizeAsInt() != 0) {
+	                size = column.getSizeAsInt()>50?50:column.getSizeAsInt();
+	            } else {
+	                // No max length so default to 50
+	                size = 50;
+	            }
+	            objectValue = randomString(size);
+        		}
         } else if (type == Types.OTHER) {
             if ("UUID".equalsIgnoreCase(column.getJdbcTypeName())) {
                 objectValue = randomUUID();
@@ -1200,7 +1220,7 @@ public class DbFill {
         return textColumnExpression;
     }
 
-    class ForeignKeyReference {
+    static class ForeignKeyReference {
         ForeignKey fk;
         Reference ref;
         

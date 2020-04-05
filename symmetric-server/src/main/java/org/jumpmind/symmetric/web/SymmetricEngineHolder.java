@@ -64,6 +64,7 @@ import org.jumpmind.symmetric.model.NodeGroupLinkAction;
 import org.jumpmind.symmetric.service.IConfigurationService;
 import org.jumpmind.symmetric.service.IRegistrationService;
 import org.jumpmind.symmetric.service.ITriggerRouterService;
+import org.jumpmind.symmetric.util.SymmetricUtils;
 import org.jumpmind.util.CustomizableThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -178,6 +179,8 @@ public class SymmetricEngineHolder {
 
     public void start() {
         try {
+            SymmetricUtils.logNotices();
+
             if (staticEnginesMode) {
                 log.info("In static engine mode");
                 engines = staticEngines;
@@ -325,12 +328,12 @@ public class SymmetricEngineHolder {
             }
         }
         
-        String loadOnlyPassword = properties.getProperty(ClientSymmetricEngine.LOAD_ONLY_PROPERTY_PREFIX + BasicDataSourcePropertyConstants.DB_POOL_PASSWORD);
+        String loadOnlyPassword = properties.getProperty(ParameterConstants.LOAD_ONLY_PROPERTY_PREFIX + BasicDataSourcePropertyConstants.DB_POOL_PASSWORD);
         
         if (StringUtils.isNotBlank(loadOnlyPassword) && !loadOnlyPassword.startsWith(SecurityConstants.PREFIX_ENC)) {
             try {
                 ISecurityService service = SecurityServiceFactory.create(SecurityServiceType.CLIENT, properties);
-                properties.setProperty(ClientSymmetricEngine.LOAD_ONLY_PROPERTY_PREFIX + BasicDataSourcePropertyConstants.DB_POOL_PASSWORD,
+                properties.setProperty(ParameterConstants.LOAD_ONLY_PROPERTY_PREFIX + BasicDataSourcePropertyConstants.DB_POOL_PASSWORD,
                         SecurityConstants.PREFIX_ENC + service.encrypt(loadOnlyPassword));
             } catch (Exception ex) {
                 log.warn("Could not encrypt load only password", ex);
@@ -366,7 +369,6 @@ public class SymmetricEngineHolder {
         try {
 
             String registrationUrl = properties.getProperty(ParameterConstants.REGISTRATION_URL);
-            boolean loadOnly = properties.is(ParameterConstants.NODE_LOAD_ONLY, false);
             if (StringUtils.isNotBlank(registrationUrl)) {
                 Collection<ServerSymmetricEngine> all = getEngines().values();
                 for (ISymmetricEngine currentEngine : all) {

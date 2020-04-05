@@ -57,9 +57,15 @@ public class PurgeServiceSqlMap extends AbstractSqlMap {
         putSql("selectDataRangeSql" ,
 "select min(data_id) as min_id, max(data_id) as max_id from $(data) where data_id < (select max(data_id) from $(data))   " );
 
-        putSql("updateStrandedBatches" ,
-"update $(outgoing_batch) set status=? where node_id not                   " + 
-"  in (select node_id from $(node) where sync_enabled=?) and status != ?   " );
+        putSql("selectNodesWithStrandedBatches", "select distinct node_id from $(outgoing_batch) " + 
+"where node_id not in (select node_id from $(node) where sync_enabled = ?) and status != ?");
+
+        putSql("updateStrandedBatches", "update $(outgoing_batch) set status=? where node_id=? and status != ?");
+
+        putSql("selectChannelsWithStrandedBatches", "select distinct channel_id from $(outgoing_batch) " +
+"where channel_id not in (select channel_id from $(channel)) and status != ?");
+
+        putSql("updateStrandedBatchesByChannel", "update $(outgoing_batch) set status=? where channel_id=? and status != ?");
 
         putSql("deleteStrandedData" ,
 "delete from $(data) where                                       " + 
@@ -115,15 +121,35 @@ public class PurgeServiceSqlMap extends AbstractSqlMap {
         putSql("deleteExtractRequestByCreateTimeSql", "delete from $(extract_request) where create_time < ?");
 
         putSql("selectStrandedDataEventRangeSql" ,
-"select min(data_id) as min_id, max(data_id) as max_id from $(data_event) " +
-"where batch_id not in (select batch_id from $(outgoing_batch))");
+"select min(batch_id) as min_id, max(batch_id)+1 as max_id from $(data_event) " + 
+"where create_time < ? " +
+"and batch_id < (select min(batch_id) from $(outgoing_batch))");
 
         putSql("deleteStrandedDataEvent",
 "delete from $(data_event) " + 
-"where data_id between ? and ? " +
+"where batch_id between ? and ? " +
 "and create_time < ? " +
-"and batch_id not in (select batch_id from $(outgoing_batch))");
+"and batch_id not in (select batch_id from $(outgoing_batch) where batch_id between ? and ?)");
+
+        putSql("minOutgoingBatchNotStatusSql",
+                "select min(batch_id) from $(outgoing_batch) where status != ?");
+
+        putSql("deleteDataEventByRangeSql", "delete from $(data_event) where batch_id between ? and ?");
+
+        putSql("deleteOutgoingBatchByRangeSql", "delete from $(outgoing_batch) where batch_id between ? and ?");
+
+        putSql("countOutgoingBatchNotStatusSql",
+                "select count(*) from $(outgoing_batch) where status != ?");
+
+        putSql("selectDataEventMinNotStatusSql", "select min(data_id) from $(data_event) " +
+                "where batch_id in (select batch_id from $(outgoing_batch) where status != ?)");
+
+        putSql("deleteDataByRangeSql", "delete from $(data) where data_id between ? and ? and create_time < ?");
+
+        putSql("selectOldChannelsForData", "select distinct channel_id from $(data) where channel_id not in (select channel_id from $(channel))");
         
+        putSql("deleteDataByChannel", "delete from $(data) where channel_id = ?");
+
     }
 
 }

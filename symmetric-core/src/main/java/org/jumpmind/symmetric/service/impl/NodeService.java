@@ -389,13 +389,14 @@ public class NodeService extends AbstractService implements INodeService {
         long cacheTimeoutInMs = parameterService.getLong(ParameterConstants.CACHE_TIMEOUT_NODE_GROUP_LINK_IN_MS);
         if (node != null) {
             List<Node> list = targetNodesCache.get(eventAction.name());
+            
             if (list == null || (System.currentTimeMillis() - targetNodeLinkCacheTime.get(eventAction.toString())) >= cacheTimeoutInMs) {
                 list = sqlTemplate.query(getSql("selectNodePrefixSql", "findNodesWhoITargetSql"),
                         new NodeRowMapper(), node.getNodeGroupId(), eventAction.name());
                 targetNodesCache.put(eventAction.name(), list);
                 targetNodeLinkCacheTime.put(eventAction.toString(),System.currentTimeMillis());
             }
-            return list;
+            return new ArrayList<Node>(list);
         } else {
             return Collections.emptyList();
         }
@@ -447,6 +448,14 @@ public class NodeService extends AbstractService implements INodeService {
         }
     }
 
+    public Node findRootNode() {
+        List<Node> nodeList = sqlTemplate.query(getSql("selectNodePrefixSql", "findRootNodeSql"), new NodeRowMapper());
+        if (nodeList.size() > 0) {
+            return nodeList.get(0);
+        }
+        return null;
+    }
+    
     /**
      * Lookup a node_security in the database, which contains private
      * information used to authenticate.
@@ -849,7 +858,7 @@ public class NodeService extends AbstractService implements INodeService {
         }
     }
         
-    class NodeRowMapper implements ISqlRowMapper<Node> {
+    static class NodeRowMapper implements ISqlRowMapper<Node> {
         public Node mapRow(Row rs) {
             Node node = new Node();
             node.setNodeId(rs.getString("node_id"));
@@ -891,7 +900,7 @@ public class NodeService extends AbstractService implements INodeService {
         }
     }
 
-    class NodeHostRowMapper implements ISqlRowMapper<NodeHost> {
+    static class NodeHostRowMapper implements ISqlRowMapper<NodeHost> {
         public NodeHost mapRow(Row rs) {
             NodeHost nodeHost = new NodeHost();
             nodeHost.setNodeId(rs.getString("node_id"));
@@ -924,7 +933,11 @@ public class NodeService extends AbstractService implements INodeService {
         if (node == null) {
             retVal = AuthenticationStatus.REGISTRATION_REQUIRED;
         } else if (!syncEnabled(node)) {
-            retVal = AuthenticationStatus.SYNC_DISABLED;
+            if(registrationOpen(node)){
+                retVal = AuthenticationStatus.REGISTRATION_REQUIRED;
+            }else{
+                retVal = AuthenticationStatus.SYNC_DISABLED;
+            }
         } else if (!isNodeAuthorized(nodeId, securityToken)) {
             retVal = AuthenticationStatus.FORBIDDEN;
         }
@@ -937,6 +950,14 @@ public class NodeService extends AbstractService implements INodeService {
             syncEnabled = node.isSyncEnabled();
         }
         return syncEnabled;
-    }    
+    }
+
+    protected boolean registrationOpen(Node node){
+        NodeSecurity security = findNodeSecurity(node.getNodeId());
+        if(security != null){
+            return security.isRegistrationEnabled();
+        }
+        return false;
+    } 
 
 }

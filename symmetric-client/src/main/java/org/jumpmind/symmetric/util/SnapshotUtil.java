@@ -46,6 +46,8 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.TreeSet;
 
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
 import javax.sql.DataSource;
 
 import org.apache.commons.dbcp.BasicDataSource;
@@ -57,14 +59,19 @@ import org.apache.log4j.Appender;
 import org.apache.log4j.FileAppender;
 import org.apache.log4j.Layout;
 import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement;
+import org.jumpmind.db.model.CatalogSchema;
 import org.jumpmind.db.model.Table;
+import org.jumpmind.db.sql.ISqlTemplate;
+import org.jumpmind.db.sql.Row;
 import org.jumpmind.exception.IoException;
 import org.jumpmind.properties.DefaultParameterParser.ParameterMetaData;
 import org.jumpmind.symmetric.ISymmetricEngine;
 import org.jumpmind.symmetric.common.ParameterConstants;
 import org.jumpmind.symmetric.common.SystemConstants;
 import org.jumpmind.symmetric.common.TableConstants;
+import org.jumpmind.symmetric.csv.CsvWriter;
 import org.jumpmind.symmetric.db.firebird.FirebirdSymmetricDialect;
+import org.jumpmind.symmetric.db.mysql.MySqlSymmetricDialect;
 import org.jumpmind.symmetric.io.data.DbExport;
 import org.jumpmind.symmetric.io.data.DbExport.Format;
 import org.jumpmind.symmetric.job.IJob;
@@ -102,52 +109,7 @@ public class SnapshotUtil {
         IParameterService parameterService = engine.getParameterService();
         File tmpDir = new File(parameterService.getTempDirectory(), dirName);
         tmpDir.mkdirs();
-
-        File logDir = null;
-
-        String parameterizedLogDir = parameterService.getString("server.log.dir");
-        if (isNotBlank(parameterizedLogDir)) {
-            logDir = new File(parameterizedLogDir);
-        }
-
-        if (logDir != null && logDir.exists()) {
-            log.info("Using server.log.dir setting as the location of the log files");
-        } else {
-            logDir = new File("logs");
-
-            if (!logDir.exists()) {
-                Map<File, Layout> matches = findSymmetricLogFile();
-                if (matches != null && matches.size() == 1) {
-                    logDir = matches.keySet().iterator().next().getParentFile();
-                }
-            }
-
-            if (!logDir.exists()) {
-                logDir = new File("../logs");
-            }
-
-            if (!logDir.exists()) {
-                logDir = new File("target");
-            }
-
-            if (logDir.exists()) {
-                File[] files = logDir.listFiles();
-                if (files != null) {
-                    for (File file : files) {
-                        String lowerCaseFileName = file.getName().toLowerCase();
-                        if (lowerCaseFileName.contains(".log")
-                                && (lowerCaseFileName.contains("symmetric") || lowerCaseFileName.contains("wrapper"))) {
-                            try {
-                                FileUtils.copyFileToDirectory(file, tmpDir);
-                            } catch (IOException e) {
-                                log.warn("Failed to copy " + file.getName() + " to the snapshot directory", e);
-                            }
-                        }
-                    }
-                }
-            }
-
-        }
+        log.info("Creating snapshot file in " + tmpDir.getAbsolutePath());
 
         FileWriter fwriter = null;
         try {
@@ -173,33 +135,59 @@ public class SnapshotUtil {
             log.warn("Failed to copy " + serviceConfFile.getName() + " to the snapshot directory", e);
         }
 
-        TreeSet<Table> tables = new TreeSet<Table>();
         FileOutputStream fos = null;
         try {
+            HashMap<CatalogSchema, List<Table>> catalogSchemas = new HashMap<CatalogSchema, List<Table>>();
             ITriggerRouterService triggerRouterService = engine.getTriggerRouterService();
             List<TriggerHistory> triggerHistories = triggerRouterService.getActiveTriggerHistories();
             for (TriggerHistory triggerHistory : triggerHistories) {
                 Table table = engine.getDatabasePlatform().getTableFromCache(triggerHistory.getSourceCatalogName(),
                         triggerHistory.getSourceSchemaName(), triggerHistory.getSourceTableName(), false);
                 if (table != null && !table.getName().toUpperCase().startsWith(engine.getSymmetricDialect().getTablePrefix().toUpperCase())) {
-                    tables.add(table);
+                    addTableToMap(catalogSchemas, new CatalogSchema(table.getCatalog(), table.getSchema()), table);
                 }
             }
 
+            List<String> catalogNames = engine.getDatabasePlatform().getDdlReader().getCatalogNames();
             List<Trigger> triggers = triggerRouterService.getTriggers();
             for (Trigger trigger : triggers) {
-                Table table = engine.getDatabasePlatform().getTableFromCache(trigger.getSourceCatalogName(), trigger.getSourceSchemaName(),
-                        trigger.getSourceTableName(), false);
-                if (table != null) {
-                    tables.add(table);
-                }
+            	if (StringUtils.isBlank(trigger.getSourceCatalogName()) || catalogNames.contains(trigger.getSourceCatalogName())) {
+	                Table table = engine.getDatabasePlatform().getTableFromCache(trigger.getSourceCatalogName(), trigger.getSourceSchemaName(),
+	                        trigger.getSourceTableName(), false);
+	                if (table != null) {
+	                    addTableToMap(catalogSchemas, new CatalogSchema(table.getCatalog(), table.getSchema()), table);
+	                }
+            	}
             }
 
-            fos = new FileOutputStream(new File(tmpDir, "table-definitions.xml"));
-            DbExport export = new DbExport(engine.getDatabasePlatform());
-            export.setFormat(Format.XML);
-            export.setNoData(true);
-            export.exportTables(fos, tables.toArray(new Table[tables.size()]));
+            for (CatalogSchema catalogSchema : catalogSchemas.keySet()) {
+                DbExport export = new DbExport(engine.getDatabasePlatform());
+                boolean isDefaultCatalog = StringUtils.equalsIgnoreCase(catalogSchema.getCatalog(), engine.getDatabasePlatform().getDefaultCatalog());
+                boolean isDefaultSchema = StringUtils.equalsIgnoreCase(catalogSchema.getSchema(), engine.getDatabasePlatform().getDefaultSchema());
+
+                if (isDefaultCatalog && isDefaultSchema) {
+                    fos = new FileOutputStream(new File(tmpDir, "table-definitions.xml"));
+                } else {
+                    String extra = "";
+                    if (!isDefaultCatalog && catalogSchema.getCatalog() != null) {
+                        extra += catalogSchema.getCatalog();
+                        export.setCatalog(catalogSchema.getCatalog());
+                    }
+                    if (!isDefaultSchema && catalogSchema.getSchema() != null) {
+                    	if (!extra.equals("")) {
+                    		extra += "-";
+                    	}
+                        extra += catalogSchema.getSchema();
+                        export.setSchema(catalogSchema.getSchema());
+                    }
+                    fos = new FileOutputStream(new File(tmpDir, "table-definitions-" + extra + ".xml"));
+                }
+             
+                List<Table> tables = catalogSchemas.get(catalogSchema);
+                export.setFormat(Format.XML);
+                export.setNoData(true);
+                export.exportTables(fos, tables.toArray(new Table[tables.size()]));
+            }
         } catch (Exception e) {
             log.warn("Failed to export table definitions", e);
         } finally {
@@ -263,6 +251,7 @@ public class SnapshotUtil {
         extract(export, 5000, "order by relative_dir, file_name", new File(tmpDir, "sym_file_snapshot.csv"),
                 TableConstants.getTableName(tablePrefix, TableConstants.SYM_FILE_SNAPSHOT));
 
+        export.setIgnoreMissingTables(true);
         extract(export, new File(tmpDir, "sym_console_event.csv"),
                 TableConstants.getTableName(tablePrefix, TableConstants.SYM_CONSOLE_EVENT));
 
@@ -278,6 +267,30 @@ public class SnapshotUtil {
             for (String table : monTables) {
                 extract(export, new File(tmpDir, "firebird-" + table + ".csv"), table);
             }
+        }
+        
+        if (engine.getSymmetricDialect() instanceof MySqlSymmetricDialect) {
+        	extractQuery(engine.getSqlTemplate(), tmpDir + File.separator + "mysql-processlist.csv",
+        			"show processlist");
+        }
+
+        if (!engine.getParameterService().is(ParameterConstants.CLUSTER_LOCKING_ENABLED)) {
+            try {
+                List<DataGap> gaps = engine.getRouterService().getDataGaps();
+                SimpleDateFormat dformat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+                fos = new FileOutputStream(new File(tmpDir, "sym_data_gap_cache.csv"));
+                fos.write("start_id,end_id,create_time,last_update_time\n".getBytes());
+                if (gaps != null) {
+                    for (DataGap gap : gaps) {
+                        fos.write((gap.getStartId() + "," + gap.getEndId() + ",\"" + dformat.format(gap.getCreateTime()) + "\",\""
+                                + dformat.format(gap.getLastUpdateTime()) + "\"\n").getBytes());
+                    }
+                }
+            } catch (IOException e) {
+                log.warn("Failed to export data gap information", e);
+            } finally {
+                IOUtils.closeQuietly(fos);
+            }            
         }
 
         fwriter = null;
@@ -363,15 +376,64 @@ public class SnapshotUtil {
             IOUtils.closeQuietly(fos);
         }
 
+        File logDir = null;
+
+        String parameterizedLogDir = parameterService.getString("server.log.dir");
+        if (isNotBlank(parameterizedLogDir)) {
+            logDir = new File(parameterizedLogDir);
+        }
+
+        if (logDir != null && logDir.exists()) {
+            log.info("Using server.log.dir setting as the location of the log files");
+        } else {
+            logDir = new File("logs");
+        }
+
+        if (!logDir.exists()) {
+            Map<File, Layout> matches = findSymmetricLogFile();
+            if (matches != null && matches.size() == 1) {
+                logDir = matches.keySet().iterator().next().getParentFile();
+            }
+        }
+
+        if (!logDir.exists()) {
+            logDir = new File("../logs");
+        }
+
+        if (!logDir.exists()) {
+            logDir = new File("target");
+        }
+
+        if (logDir.exists()) {
+            log.info("Copying log files into snapshot file");
+            File[] files = logDir.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    String lowerCaseFileName = file.getName().toLowerCase();
+                    if (lowerCaseFileName.contains(".log")
+                            && (lowerCaseFileName.contains("symmetric") || lowerCaseFileName.contains("wrapper"))) {
+                        try {
+                            FileUtils.copyFileToDirectory(file, tmpDir);
+                        } catch (IOException e) {
+                            log.warn("Failed to copy " + file.getName() + " to the snapshot directory", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        File jarFile = null;
         try {
-            File jarFile = new File(getSnapshotDirectory(engine), tmpDir.getName() + ".zip");
+            jarFile = new File(getSnapshotDirectory(engine), tmpDir.getName() + ".zip");
             ZipBuilder builder = new ZipBuilder(tmpDir, jarFile, new File[] { tmpDir });
             builder.build();
             FileUtils.deleteDirectory(tmpDir);
-            return jarFile;
         } catch (Exception e) {
             throw new IoException("Failed to package snapshot files into archive", e);
         }
+        
+        log.info("Done creating snapshot file");
+        return jarFile;
     }
 
     protected static void extract(DbExport export, File file, String... tables) {
@@ -389,6 +451,32 @@ public class SnapshotUtil {
             log.warn("Failed to export table definitions", e);
         } finally {
             IOUtils.closeQuietly(fos);
+        }
+    }
+
+    protected static void extractQuery(ISqlTemplate sqlTemplate, String fileName, String sql) {
+    	CsvWriter writer = null;
+        try {
+        	List<Row> rows = sqlTemplate.query(sql);
+        	writer = new CsvWriter(fileName);
+            boolean isFirstRow = true;
+        	for (Row row : rows) {
+        		if (isFirstRow) {
+            		for (String key : row.keySet()) {
+            			writer.write(key);
+            		}
+            		writer.endRecord();
+            		isFirstRow = false;
+        		}
+        		for (String key : row.keySet()) {
+        			writer.write(row.getString(key));
+        		}
+        		writer.endRecord();
+        	}
+        } catch (Exception e) {
+            log.warn("Failed to run extract query " + sql, e);
+        } finally {
+            writer.close();
         }
     }
 
@@ -477,7 +565,8 @@ public class SnapshotUtil {
             runtimeProperties.setProperty("os.load.average", String.valueOf(osBean.getSystemLoadAverage()));
 
             runtimeProperties.setProperty("engine.is.started", Boolean.toString(engine.isStarted()));
-            runtimeProperties.setProperty("engine.last.restart", engine.getLastRestartTime().toString());
+            runtimeProperties.setProperty("engine.last.restart", engine.getLastRestartTime() != null ? 
+            		engine.getLastRestartTime().toString() : "");
 
             runtimeProperties.setProperty("time.server", new Date().toString());
             runtimeProperties.setProperty("time.database", new Date(engine.getSymmetricDialect().getDatabaseTime()).toString());
@@ -499,13 +588,27 @@ public class SnapshotUtil {
             runtimeProperties.setProperty("data.id.min", Long.toString(engine.getDataService().findMinDataId()));
             runtimeProperties.setProperty("data.id.max", Long.toString(engine.getDataService().findMaxDataId()));
 
-            runtimeProperties.put("jvm.title", Runtime.class.getPackage().getImplementationTitle());
-            runtimeProperties.put("jvm.vendor", Runtime.class.getPackage().getImplementationVendor());
-            runtimeProperties.put("jvm.version", Runtime.class.getPackage().getImplementationVersion());
+            String jvmTitle = Runtime.class.getPackage().getImplementationTitle();
+            runtimeProperties.put("jvm.title", jvmTitle != null ? jvmTitle : "Unknown");
+            String jvmVendor = Runtime.class.getPackage().getImplementationVendor();
+            runtimeProperties.put("jvm.vendor", jvmVendor != null ? jvmVendor : "Unknown");
+            String jvmVersion = Runtime.class.getPackage().getImplementationVersion();
+            runtimeProperties.put("jvm.version", jvmVersion != null ? jvmVersion : "Unknown");
             RuntimeMXBean runtimeMxBean = ManagementFactory.getRuntimeMXBean();
             List<String> arguments = runtimeMxBean.getInputArguments();
             runtimeProperties.setProperty("jvm.arguments", arguments.toString());
+            runtimeProperties.setProperty("hostname", AppUtils.getHostName());
+            runtimeProperties.setProperty("instance.id", engine.getClusterService().getInstanceId());
+            runtimeProperties.setProperty("server.id", engine.getClusterService().getServerId());
 
+            try {
+	            MBeanServer mbeanServer = ManagementFactory.getPlatformMBeanServer();
+	            ObjectName oName = new ObjectName("java.lang:type=OperatingSystem");
+	            runtimeProperties.setProperty("file.descriptor.open.count", mbeanServer.getAttribute(oName, "OpenFileDescriptorCount").toString());
+	            runtimeProperties.setProperty("file.descriptor.max.count", mbeanServer.getAttribute(oName, "MaxFileDescriptorCount").toString());
+            } catch (Exception e) {
+            }
+            
             runtimeProperties.store(fos, "runtime-stats.properties");
         } catch (Exception e) {
             log.warn("Failed to export runtime-stats information", e);
@@ -622,6 +725,15 @@ public class SnapshotUtil {
             IOUtils.closeQuietly(fwriter);
         }
         return file;
+    }
+
+    private static void addTableToMap(HashMap<CatalogSchema, List<Table>> catalogSchemas, CatalogSchema catalogSchema, Table table) {
+        List<Table> tables = catalogSchemas.get(catalogSchema);
+        if (tables == null) {
+            tables = new ArrayList<Table>();
+            catalogSchemas.put(catalogSchema, tables);
+        }
+        tables.add(table);
     }
 
     static class SortedProperties extends Properties {

@@ -45,6 +45,7 @@ import org.jumpmind.symmetric.SymmetricException;
 import org.jumpmind.symmetric.common.TableConstants;
 import org.jumpmind.symmetric.io.DbCompareReport.TableReport;
 import org.jumpmind.symmetric.model.Trigger;
+import org.jumpmind.symmetric.model.TriggerHistory;
 import org.jumpmind.symmetric.model.TriggerRouter;
 import org.jumpmind.symmetric.service.impl.TransformService.TransformTableNodeGroupLink;
 import org.slf4j.Logger;
@@ -79,6 +80,7 @@ public class DbCompare {
 
     public DbCompareReport compare() {
         dbValueComparator.setNumericScale(config.getNumericScale());
+        dbValueComparator.setDateTimeFormat(config.getDateTimeFormat());
         
         log.info("Starting DBCompare with config:\n{}", config.report());
 
@@ -308,7 +310,7 @@ public class DbCompare {
 
     protected  List<DbCompareTables> loadTablesFromConfig() {        
         List<Trigger> triggers = sourceEngine.getTriggerRouterService().getTriggersForCurrentNode(true);
-        List<String> configTables = TableConstants.getConfigTables(sourceEngine.getTablePrefix());
+        List<String> configTables = TableConstants.getTables(sourceEngine.getTablePrefix());
 
         List<String> tableNames = new ArrayList<String>();
 
@@ -348,6 +350,25 @@ public class DbCompare {
             if (sourceTable == null) {
                 log.warn("No source table found for name {}", tableName);
                 continue;
+            }
+
+            if (config.isUseSymmetricConfig()) {
+                String catalog = null;
+                String schema = null;
+                if (!StringUtils.equals(sourceEngine.getDatabasePlatform().getDefaultCatalog(), sourceTable.getCatalog())) {
+                    catalog = sourceTable.getCatalog();
+                }
+                if (!StringUtils.equals(sourceEngine.getDatabasePlatform().getDefaultSchema(), sourceTable.getSchema())) {
+                    schema = sourceTable.getSchema();
+                }
+
+                TriggerHistory hist = sourceEngine.getTriggerRouterService().findTriggerHistory(catalog, schema,
+                        sourceTable.getName());
+                if (hist != null) {
+                    sourceTable = sourceTable.copyAndFilterColumns(hist.getParsedColumnNames(), hist.getParsedPkColumnNames(), true);
+                } else {
+                    log.warn("No trigger history found for {}", sourceTable.getFullyQualifiedTableName());
+                }
             }
 
             DbCompareTables tables = new DbCompareTables(sourceTable, null);
@@ -436,8 +457,8 @@ public class DbCompare {
             
             TriggerRouter triggerRouter = getTriggerRouterFor(tables.getSourceTable());
             if (triggerRouter != null) {
-                catalog = triggerRouter.getTargetCatalog(catalog);
-                schema = triggerRouter.getTargetSchema(schema);
+                catalog = triggerRouter.getTargetCatalog(catalog, null);
+                schema = triggerRouter.getTargetSchema(schema, null);
             }
         } 
         
@@ -559,7 +580,7 @@ public class DbCompare {
         }                
     }
 
-    class CountingSqlReadCursor implements ISqlReadCursor<Row>, Closeable {
+    static class CountingSqlReadCursor implements ISqlReadCursor<Row>, Closeable {
 
         ISqlReadCursor<Row> wrapped;
         int count = 0;

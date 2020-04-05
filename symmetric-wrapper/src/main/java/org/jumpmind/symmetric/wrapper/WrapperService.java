@@ -71,6 +71,7 @@ public abstract class WrapperService {
             throw new WrapperException(Constants.RC_SERVER_ALREADY_RUNNING, 0, "Server is already running");
         }
 
+        stopProcesses(true);
         System.out.println("Waiting for server to start");
         ArrayList<String> cmdLine = getWrapperCommand("exec");
         Process process = null;
@@ -183,11 +184,12 @@ public abstract class WrapperService {
                             logger.log(Level.INFO, line, "java");
                             if ((usingHeapDump && line.matches("Heap dump file created.*")) || 
                                     (!usingHeapDump && line.matches("java.lang.OutOfMemoryError.*")) ||
-                                    line.matches(".*java.net.BindException.*")) {
+                                    line.matches(".*java.net.BindException.*") ||
+                                    line.matches(".*A fatal error has been detected.*")) {
                                 logger.log(Level.SEVERE, "Stopping server because its output matches a failure condition");
                                 child.destroy();
                                 childReader.close();
-                                stopProcess(serverPid, "symmetricds");
+                                stopProcess(serverPid, "server");
                                 break;
                             }
                             if (line.equalsIgnoreCase("Restarting")) {
@@ -204,6 +206,26 @@ public abstract class WrapperService {
                         restartDetected = false;
                         startProcess = true;
                     } else if (keepRunning) {
+                        long tenminutesinms = 60 * 10 * 1000;
+                        long twelveminutesinms = 60 * 12 * 1000;
+                        long tensecondsinms = 10 * 1000;
+                        long now = System.currentTimeMillis();
+                        while(child.isAlive()) {
+                            logger.log(Level.WARNING, "Server process has not stopped yet");
+                            if(System.currentTimeMillis() - now > twelveminutesinms) {
+                                logger.log(Level.SEVERE, "Server process never exited, exiting now");
+                                child.destroyForcibly();
+                                // If it has not exited by now, it probably never will.
+                                break;
+                            }
+                            if(System.currentTimeMillis() - now > tenminutesinms) {
+                                logger.log(Level.SEVERE, "Server process never exited, trying to force the exit of server process");
+                                child.destroyForcibly();
+                            }
+                            try {
+                                Thread.sleep(tensecondsinms);
+                            } catch(InterruptedException e) { }
+                        }
                         logger.log(Level.SEVERE, "Unexpected exit from server: " + child.exitValue());
                         long runTime = System.currentTimeMillis() - startTime;
                         if (System.currentTimeMillis() - startTime < 7000) {
@@ -223,24 +245,49 @@ public abstract class WrapperService {
                 updateStatus(Status.STOPPED);
                 throw new WrapperException(Constants.RC_SERVER_EXITED, child.exitValue(), "Exception caught.");                
             } catch (Throwable ex2) {
-                ex.printStackTrace();
+                ex2.printStackTrace();
             }
         }
     }
 
     public void stop() {
-        int symPid = readPidFromFile(config.getServerPidFile());
-        int wrapperPid = readPidFromFile(config.getWrapperPidFile());
-        if (!isPidRunning(symPid) && !isPidRunning(wrapperPid)) {
-            throw new WrapperException(Constants.RC_SERVER_NOT_RUNNING, 0, "Server is not running");
-        }
-        System.out.println("Waiting for server to stop");
-        if (!(stopProcess(wrapperPid, "wrapper") && stopProcess(symPid, "symmetricds"))) {
-            throw new WrapperException(Constants.RC_FAIL_STOP_SERVER, 0, "Server did not stop");
-        }
+        stopProcesses(false);
+        deletePidFile(config.getServerPidFile());
+        deletePidFile(config.getWrapperPidFile());
         System.out.println("Stopped");
     }
-    
+
+    protected void stopProcesses(boolean isStopAbandoned) {
+        int serverPid = readPidFromFile(config.getServerPidFile());
+        int wrapperPid = readPidFromFile(config.getWrapperPidFile());
+        boolean isServerRunning = isPidRunning(serverPid);
+        boolean isWrapperRunning = isPidRunning(wrapperPid);
+
+        if (!isStopAbandoned) {
+            if (!isServerRunning && !isWrapperRunning) {
+                throw new WrapperException(Constants.RC_SERVER_NOT_RUNNING, 0, "Server is not running");
+            }
+
+            System.out.println("Waiting for server to stop");
+        }
+
+        if (isWrapperRunning) {
+            if (isStopAbandoned) {
+                System.out.println("Stopping abandoned wrapper PID " + wrapperPid);
+            }
+            isWrapperRunning = !stopProcess(wrapperPid, "wrapper");
+        }
+        if (isServerRunning) {
+            if (isStopAbandoned) {
+                System.out.println("Stopping abandoned server PID " + serverPid);
+            }
+            isServerRunning = !stopProcess(serverPid, "server");
+        }
+        if (isWrapperRunning || isServerRunning) {
+            throw new WrapperException(Constants.RC_FAIL_STOP_SERVER, 0, "Server did not stop");
+        }
+    }
+
     protected boolean stopProcess(int pid, String name) {
         killProcess(pid, false);
         if (waitForPid(pid)) {
@@ -282,22 +329,25 @@ public abstract class WrapperService {
         start();
     }
     
-    public void relaunchAsPrivileged(String cmd, String args) {
+    public void relaunchAsPrivileged(String className) {
     }
 
     public void status() {
         boolean isRunning = isRunning();
+        int wrapperPid = readPidFromFile(config.getWrapperPidFile());
+        int serverPid = readPidFromFile(config.getServerPidFile());
+        
         System.out.println("Installed: " + isInstalled());
         System.out.println("Running: " + isRunning);
-        if (isRunning) {
-            System.out.println("Wrapper PID: " + readPidFromFile(config.getWrapperPidFile()));
-            System.out.println("Server PID: " + readPidFromFile(config.getServerPidFile()));
-        }
+        System.out.println("Wrapper PID: " + wrapperPid);
+        System.out.println("Wrapper Running: " + isPidRunning(wrapperPid));
+        System.out.println("Server PID: " + serverPid);
+        System.out.println("Server Running: " + isPidRunning(serverPid));
     }
 
     public boolean isRunning() {
-        return isPidRunning(readPidFromFile(config.getWrapperPidFile())) ||
-                isPidRunning(readPidFromFile(config.getServerPidFile()));
+        return isPidRunning(readPidFromFile(config.getWrapperPidFile()))
+                && isPidRunning(readPidFromFile(config.getServerPidFile()));
     }
 
     public int getWrapperPid() {
@@ -346,7 +396,7 @@ public abstract class WrapperService {
             pid = Integer.parseInt(reader.readLine());
             reader.close();
         } catch (FileNotFoundException e) {
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
         return pid;

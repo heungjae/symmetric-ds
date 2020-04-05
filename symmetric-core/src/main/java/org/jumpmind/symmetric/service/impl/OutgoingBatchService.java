@@ -239,14 +239,15 @@ public class OutgoingBatchService extends AbstractService implements IOutgoingBa
                         outgoingBatch.getFallbackInsertCount(), outgoingBatch.getFallbackUpdateCount(), outgoingBatch.getIgnoreRowCount(),
                         outgoingBatch.getMissingDeleteCount(), outgoingBatch.getSkipCount(), outgoingBatch.getExtractRowCount(),
                         outgoingBatch.getExtractInsertRowCount(), outgoingBatch.getExtractUpdateRowCount(),
-                        outgoingBatch.getExtractDeleteRowCount(), outgoingBatch.getBatchId(), outgoingBatch.getNodeId() },
+                        outgoingBatch.getExtractDeleteRowCount(), outgoingBatch.getTransformExtractMillis(), outgoingBatch.getTransformLoadMillis(),
+                        outgoingBatch.getBatchId(), outgoingBatch.getNodeId() },
                 new int[] { Types.CHAR, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC,
                         Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC,
                         Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC,
                         Types.TIMESTAMP, Types.TIMESTAMP, Types.TIMESTAMP, Types.VARCHAR, Types.NUMERIC, Types.VARCHAR, Types.NUMERIC,
                         Types.VARCHAR, Types.VARCHAR, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC,
                         Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC, Types.NUMERIC,
-                        Types.NUMERIC,
+                        Types.NUMERIC, Types.NUMERIC, Types.NUMERIC,
                         symmetricDialect.getSqlTypeForIds(), Types.VARCHAR });
     }
 
@@ -696,7 +697,7 @@ public class OutgoingBatchService extends AbstractService implements IOutgoingBa
         return sqlTemplateDirty.queryForObject(getSql("getLoadSummarySql"), new LoadSummaryMapper(), loadId);
     }
 
-    private class LoadSummaryMapper implements ISqlRowMapper<LoadSummary> {
+    private static class LoadSummaryMapper implements ISqlRowMapper<LoadSummary> {
         public LoadSummary mapRow(Row rs) {
             LoadSummary summary = new LoadSummary();
             // summary.setLoadId(rs.getLong("load_id"));
@@ -725,7 +726,7 @@ public class OutgoingBatchService extends AbstractService implements IOutgoingBa
         return mapper.getResults();
     }
 
-    private class LoadStatusByQueueMapper implements ISqlRowMapper<Object> {
+    private static class LoadStatusByQueueMapper implements ISqlRowMapper<Object> {
         Map<String, Map<String, LoadStatusSummary>> results = new TreeMap<String, Map<String, LoadStatusSummary>>(Collections.reverseOrder());
         String tablePrefix;
 
@@ -781,7 +782,7 @@ public class OutgoingBatchService extends AbstractService implements IOutgoingBa
         }
     }
 
-    public class LoadStatusSummary {
+    public static class LoadStatusSummary {
         private long dataEventCount;
         private long byteCount;
         private String status;
@@ -1021,7 +1022,7 @@ public class OutgoingBatchService extends AbstractService implements IOutgoingBa
         return sqlTemplateDirty.query(getSql("getAllBatchesSql"), new LongMapper());
     }
 
-    class OutgoingBatchSummaryMapper implements ISqlRowMapper<OutgoingBatchSummary> {
+    static class OutgoingBatchSummaryMapper implements ISqlRowMapper<OutgoingBatchSummary> {
     		boolean withNode = false;
     		boolean withChannel = false;
     		
@@ -1086,7 +1087,7 @@ public class OutgoingBatchService extends AbstractService implements IOutgoingBa
             if (channel != null && (includeDisabledChannels || channel.isEnabled())) {
                 OutgoingBatch batch = new OutgoingBatch();
                 batch.setNodeId(rs.getString("node_id"));
-                batch.setStatus(rs.getString("status"));
+                batch.setStatusFromString(rs.getString("status"));
                 batch.setBatchId(rs.getLong("batch_id"));
                 if (!statusOnly) {
                     batch.setChannelId(channelId);

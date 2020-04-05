@@ -352,7 +352,12 @@ public class JdbcSqlTemplate extends AbstractSqlTemplate implements ISqlTemplate
                         long endTime = System.currentTimeMillis();
                         logSqlBuilder.logSql(log, sql, args, types, (endTime-startTime));
 
-                        return stmt.getUpdateCount();
+                        int updateCount;
+                        do{
+                            updateCount = stmt.getUpdateCount();
+                        }while(stmt.getMoreResults() || stmt.getUpdateCount() != -1);
+
+                        return updateCount;
                     } catch (SQLException e) {
                         throw logSqlBuilder.logSqlAfterException(log, sql, args, e);
                     } finally {
@@ -375,7 +380,12 @@ public class JdbcSqlTemplate extends AbstractSqlTemplate implements ISqlTemplate
                         long endTime = System.currentTimeMillis();
                         logSqlBuilder.logSql(log, sql, args, types, (endTime-startTime));
 
-                        return ps.getUpdateCount();
+                        int updateCount;
+                        do{
+                            updateCount = ps.getUpdateCount();
+                        }while(ps.getMoreResults() || ps.getUpdateCount() != -1);
+
+                        return updateCount;
                     } catch (SQLException e) {
                         throw logSqlBuilder.logSqlAfterException(log, sql, args, e);
                     } finally {
@@ -1013,8 +1023,8 @@ public class JdbcSqlTemplate extends AbstractSqlTemplate implements ISqlTemplate
                     StatementCreatorUtils.setParameterValue(ps, i, verifyArgType(arg, argType), arg);
                 }
             } catch (SQLException ex) {
-                log.warn("Parameter arg '{}' type: {} caused exception: {}", arg, argType, ex.getMessage());
-                throw ex;
+                String msg = String.format("Parameter arg '%s' type: %s caused exception: %s", arg, TypeMap.getJdbcTypeName(argType), ex.getMessage()); 
+                throw new SQLException(msg, ex);
             }
         }
     }    
@@ -1077,5 +1087,9 @@ public class JdbcSqlTemplate extends AbstractSqlTemplate implements ISqlTemplate
         StatementCreatorUtils.setParameterValue(ps, parameterPosition, SqlTypeValue.TYPE_UNKNOWN, argValue);
     }
 
+    @Override
+    public boolean isDataTruncationViolation(Throwable ex) {
+    		return false;
+    }
     
 }

@@ -90,8 +90,14 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
     
     final String CTX_KEY_REINITIALIZED = "Reinitialized."
             + ConfigurationChangedDatabaseWriterFilter.class.getSimpleName() + hashCode();
-    
+
     final String CTX_KEY_FILE_SYNC_ENABLED = "FileSyncEnabled."
+            + ConfigurationChangedDatabaseWriterFilter.class.getSimpleName() + hashCode();
+
+    final String CTX_KEY_INITIAL_LOAD_COMPLETED = "InitialLoadCompleted."
+            + ConfigurationChangedDatabaseWriterFilter.class.getSimpleName() + hashCode();
+
+    final String CTX_KEY_INITIAL_LOAD_LISTENER = "InitialLoadListener."
             + ConfigurationChangedDatabaseWriterFilter.class.getSimpleName() + hashCode();
 
     private ISymmetricEngine engine;
@@ -113,8 +119,10 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
                 engine.start();
                 context.put(CTX_KEY_REINITIALIZED, Boolean.TRUE);
             }
-        } 
-        
+        }
+
+        checkReloadStarted(context, table, data);
+
         return true;
     }
 
@@ -131,6 +139,43 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
         recordNodeSecurityFlushNeeded(context, table);
         recordNodeFlushNeeded(context, table, data);
         recordFileSyncEnabled(context, table, data);
+    }
+
+    private void checkReloadStarted(DataContext context, Table table, CsvData data) {
+        if (data.getDataEventType() == DataEventType.INSERT || data.getDataEventType() == DataEventType.UPDATE) {
+            if (matchesTable(table, TableConstants.SYM_NODE_SECURITY)) {
+
+                if (hasClientReloadListener(context)) {
+                    Map<String, String> newData = data.toColumnNameValuePairs(table.getColumnNames(), CsvData.ROW_DATA);
+                    String initialLoadEnabled = newData.get("INITIAL_LOAD_ENABLED");
+                    String nodeId = newData.get("NODE_ID");
+    
+                    INodeService nodeService = engine.getNodeService();
+                    if (nodeId.equals(nodeService.findIdentityNodeId()) || nodeService.findIdentityNodeId() == null) {
+                        boolean duringInitialLoad = nodeService.findIdentityNodeId() != null
+                                && nodeService.findNodeSecurity(nodeService.findIdentityNodeId(), true).isInitialLoadEnabled();
+                        if (!duringInitialLoad && "1".equals(initialLoadEnabled)) {
+    
+                            log.info("Reload started");
+    
+                            List<IClientReloadListener> listeners = engine.getExtensionService().getExtensionPointList(IClientReloadListener.class);
+                            for (IClientReloadListener listener : listeners) {
+                                listener.reloadStarted();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean hasClientReloadListener(DataContext context) {
+        Boolean hasListener = (Boolean) context.get(CTX_KEY_INITIAL_LOAD_LISTENER);
+        if (hasListener == null) {
+            hasListener = engine.getExtensionService().getExtensionPointList(IClientReloadListener.class).size() > 0;
+            context.put(CTX_KEY_INITIAL_LOAD_LISTENER, hasListener);
+        }
+        return hasListener;
     }
     
     private void recordGroupletFlushNeeded(DataContext context, Table table) {
@@ -160,20 +205,34 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
             tables.add(table);
         }
         
-        if (data.getDataEventType() == DataEventType.UPDATE
-                && !engine.getParameterService().is(ParameterConstants.TRIGGER_CREATE_BEFORE_INITIAL_LOAD)) {
+        if (data.getDataEventType() == DataEventType.UPDATE) {
             if (matchesTable(table, TableConstants.SYM_NODE_SECURITY)) {
                 Map<String, String> newData = data.toColumnNameValuePairs(table.getColumnNames(), CsvData.ROW_DATA);
                 String initialLoadEnabled = newData.get("INITIAL_LOAD_ENABLED");
                 String initialLoadTime = newData.get("INITIAL_LOAD_TIME");
-                if (StringUtils.isNotBlank(initialLoadTime) && "0".equals(initialLoadEnabled)) {
-                    log.info(
-                            "Requesting syncTriggers because {} is false and sym_node_security changed to indicate that an initial load has completed",
+                String nodeId = newData.get("NODE_ID");
+                boolean isInitialLoadComplete = nodeId != null && nodeId.equals(context.getBatch().getTargetNodeId()) && StringUtils.isNotBlank(initialLoadTime)
+                        && "0".equals(initialLoadEnabled);
+
+                if (isInitialLoadComplete && !engine.getParameterService().is(ParameterConstants.TRIGGER_CREATE_BEFORE_INITIAL_LOAD)) {
+                    log.info("Requesting syncTriggers because {} is false and sym_node_security changed to indicate that an initial load has completed",
                             ParameterConstants.TRIGGER_CREATE_BEFORE_INITIAL_LOAD);
                     context.put(CTX_KEY_RESYNC_NEEDED, true);
+                    engine.getRegistrationService().setAllowClientRegistration(false);
                 }
+                
+                if (isInitialLoadComplete && hasClientReloadListener(context)) {
+                    INodeService nodeService = engine.getNodeService();
+                    boolean duringInitialLoad = nodeService.findIdentityNodeId() != null
+                            && nodeService.findNodeSecurity(nodeService.findIdentityNodeId(), true).isInitialLoadEnabled();
+                    if (duringInitialLoad) {
+                        context.put(CTX_KEY_INITIAL_LOAD_COMPLETED, true);
+                    }
+                }
+
             }
         }
+
     }
 
     private void recordJobManagerRestartNeeded(DataContext context, Table table, CsvData data) {
@@ -297,6 +356,7 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
     public void syncEnded(DataContext context, List<IncomingBatch> batchesProcessed, Throwable ex) {
 
         IParameterService parameterService = engine.getParameterService();
+        INodeService nodeService = engine.getNodeService();
         
         if (context.get(CTX_KEY_FLUSH_TRANSFORMS_NEEDED) != null) {
             log.info("About to refresh the cache of transformation because new configuration came through the data loader");
@@ -306,12 +366,12 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
             context.remove(CTX_KEY_FLUSH_TRANSFORMS_NEEDED);
         }
 
-        if (context.get(CTX_KEY_RESTART_JOBMANAGER_NEEDED) != null) {
+        if (context.get(CTX_KEY_RESTART_JOBMANAGER_NEEDED) != null
+                || context.get(CTX_KEY_FILE_SYNC_ENABLED) != null) {
             IJobManager jobManager = engine.getJobManager();
             if (jobManager != null && jobManager.isStarted()) {
-                log.info("About to restart jobs because a new schedule came through the data loader");
-                jobManager.stopJobs();
-                jobManager.startJobs();
+                log.info("About to restart jobs because new configuration came through the data loader");
+                jobManager.restartJobs();                    
             }
             context.remove(CTX_KEY_RESTART_JOBMANAGER_NEEDED);
         }
@@ -323,19 +383,22 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
         if (context.get(CTX_KEY_RESYNC_NEEDED) != null
                 && parameterService.is(ParameterConstants.AUTO_SYNC_TRIGGERS)) {
             log.info("About to syncTriggers because new configuration came through the data loader");
+            engine.getClusterService().refreshLockEntries();  // Needed in case cluster.lock.enabled changed during config change.
             engine.getTriggerRouterService().syncTriggers();
             context.remove(CTX_KEY_RESYNC_NEEDED);
+            engine.getRegistrationService().setAllowClientRegistration(true);
         }
         
         if (context.get(CTX_KEY_RESYNC_TABLE_NEEDED) != null
-                && parameterService.is(ParameterConstants.AUTO_SYNC_TRIGGERS)) {
+                && parameterService.is(ParameterConstants.AUTO_SYNC_TRIGGERS)
+                && (parameterService.is(ParameterConstants.TRIGGER_CREATE_BEFORE_INITIAL_LOAD)
+                        || nodeService.findNodeSecurity(nodeService.findIdentityNodeId(), true).hasInitialLoaded())) {
             @SuppressWarnings("unchecked")
             Set<Table> tables = (Set<Table>)context.get(CTX_KEY_RESYNC_TABLE_NEEDED);
             for (Table table : tables) {
-            		if (engine.getSymmetricDialect().getPlatform().equals(engine.getSymmetricDialect().getTargetPlatform())
-            				|| table.getName().startsWith(engine.getTablePrefix())) {
-            			engine.getTriggerRouterService().syncTriggers(table, false);
-            		}
+        		if (engine.getSymmetricDialect().getPlatform().equals(engine.getSymmetricDialect().getTargetPlatform())) {
+        			engine.getTriggerRouterService().syncTriggers(table, false);
+        		}
             }
             context.remove(CTX_KEY_RESYNC_TABLE_NEEDED);
         }    
@@ -348,7 +411,21 @@ public class ConfigurationChangedDatabaseWriterFilter extends DatabaseWriterFilt
             Table fileSnapshotTable = engine.getDatabasePlatform()
                     .getTableFromCache(TableConstants.getTableName(engine.getTablePrefix(), TableConstants.SYM_FILE_SNAPSHOT), false);
             engine.getTriggerRouterService().syncTriggers(fileSnapshotTable, false);
+            
+            
             context.remove(CTX_KEY_FILE_SYNC_ENABLED);
+        }
+
+        if (context.get(CTX_KEY_INITIAL_LOAD_COMPLETED) != null) {
+
+            log.info("Reload completed");
+
+            List<IClientReloadListener> listeners = engine.getExtensionService().getExtensionPointList(IClientReloadListener.class);
+            for (IClientReloadListener listener : listeners) {
+                listener.reloadCompleted();
+            }
+
+            context.remove(CTX_KEY_INITIAL_LOAD_COMPLETED);
         }
     }
 

@@ -25,11 +25,14 @@ public class SqlTemplateSettings {
     protected int fetchSize = 1000;
     protected int queryTimeout;
     protected int batchSize = 100;
+    protected int batchBulkLoaderSize = 25;
     protected boolean readStringsAsBytes;
     protected boolean treatBinaryAsLob;
+    protected boolean rightTrimCharValues;
     protected int overrideIsolationLevel = -1;
     protected int resultSetType = java.sql.ResultSet.TYPE_FORWARD_ONLY;
     protected LogSqlBuilder logSqlBuilder;
+    protected boolean allowUpdatesWithResults = false;
     
     public SqlTemplateSettings() {     
     }      
@@ -97,5 +100,31 @@ public class SqlTemplateSettings {
     public void setResultSetType(int resultSetType) {
         this.resultSetType = resultSetType;
     }
+    
+    public boolean isRightTrimCharValues() { 
+        return rightTrimCharValues; 
+    }
+
+    public void setRightTrimCharValues(boolean rightTrimCharValues) { 
+        this.rightTrimCharValues = rightTrimCharValues; 
+    }
+
+    public boolean isAllowUpdatesWithResults() {
+        return allowUpdatesWithResults;
+    }
+
+    public void setAllowUpdatesWithResults(boolean allowUpdatesWithResults) {
+        this.allowUpdatesWithResults = allowUpdatesWithResults;
+    }
+
+    public int getBatchBulkLoaderSize() {
+        return batchBulkLoaderSize;
+    }
+
+    public void setBatchBulkLoaderSize(int batchBulkLoaderSize) {
+        this.batchBulkLoaderSize = batchBulkLoaderSize;
+    }
+    
+    
 
 }

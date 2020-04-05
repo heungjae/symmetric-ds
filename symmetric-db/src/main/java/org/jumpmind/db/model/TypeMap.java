@@ -117,7 +117,8 @@ public abstract class TypeMap
     public static final String NCLOB = "NCLOB";
     public static final String IMAGE = "IMAGE";
     public static final String DATETIME2 = "DATETIME2";
-
+    public static final String TSVECTOR = "TSVECTOR";
+    
     /** Maps type names to the corresponding {@link java.sql.Types} constants. */
     private static HashMap<String, Integer> _typeNameToTypeCode = new HashMap<String, Integer>();
 
@@ -158,7 +159,7 @@ public abstract class TypeMap
         registerJdbcType(Types.VARBINARY,     VARBINARY,     JdbcTypeCategoryEnum.BINARY);
         registerJdbcType(Types.VARCHAR,       VARCHAR,       JdbcTypeCategoryEnum.TEXTUAL);
         registerJdbcType(ORACLE_TIMESTAMPTZ,  TIMESTAMPTZ,   JdbcTypeCategoryEnum.DATETIME);
-        registerJdbcType(ORACLE_TIMESTAMPLTZ, TIMESTAMPLTZ,   JdbcTypeCategoryEnum.DATETIME);
+        registerJdbcType(ORACLE_TIMESTAMPLTZ, TIMESTAMPLTZ,  JdbcTypeCategoryEnum.DATETIME);
 
         // only available in JDK 1.4 and above:
         if (PlatformUtils.supportsJava14JdbcTypes())

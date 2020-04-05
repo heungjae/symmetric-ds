@@ -100,6 +100,7 @@ public class SymmetricLauncher extends AbstractCommandLauncher {
         super.printHelp(cmd, options);
     }
 
+    @Override
     protected void buildOptions(Options options) {
         super.buildOptions(options);
         buildCryptoOptions(options);
@@ -120,6 +121,7 @@ public class SymmetricLauncher extends AbstractCommandLauncher {
         addOption(options, OPTION_WINXP, OPTION_WINXP, false);
     }
 
+    @Override
     protected boolean executeWithOptions(CommandLine line) throws Exception {
 
         String host = null;
@@ -166,8 +168,10 @@ public class SymmetricLauncher extends AbstractCommandLauncher {
         if (line.hasOption(OPTION_NO_DIRECT_BUFFER)) {
             noDirectBuffer = true;
         }
-
-        if (!line.hasOption(OPTION_JMX_DISABLE)) {
+        
+        boolean jmxDisabledFlag = line.hasOption(OPTION_JMX_DISABLE); 
+        
+        if (!jmxDisabledFlag) {
             if (line.hasOption(OPTION_JMX_PORT)) {
                 jmxPort = new Integer(line.getOptionValue(OPTION_JMX_PORT));
             } else {
@@ -190,12 +194,14 @@ public class SymmetricLauncher extends AbstractCommandLauncher {
                     this.start();
                 }
 
+                @Override
                 public void run() {
                     log.info("Starting workaround thread to prevent system clock acceleration on Windows XP");
                     while (true) {
                         try {
                             Thread.sleep(Integer.MAX_VALUE);
                         } catch (InterruptedException ex) {
+                            // ignored.
                         }
                     }
                 }
@@ -214,6 +220,9 @@ public class SymmetricLauncher extends AbstractCommandLauncher {
             webServer.setBasicAuthUsername(httpBasicAuthUser);
             webServer.setBasicAuthPassword(httpBasicAuthPassword);
             
+            if (jmxDisabledFlag) {                
+                webServer.setJmxEnabled(false);
+            }
             if (jmxPort > 0) {
                 webServer.setJmxPort(jmxPort);
             }
@@ -281,6 +290,7 @@ public class SymmetricLauncher extends AbstractCommandLauncher {
             }
             
             Collections.sort(recentFiles, new Comparator<File>() {
+                @Override
                 public int compare(File f1, File f2) {
                     return f1.lastModified() > f2.lastModified() ? -1 : 1;
                 }
@@ -297,6 +307,7 @@ public class SymmetricLauncher extends AbstractCommandLauncher {
         }
     }
 
+    @SuppressWarnings("unused")
     protected String chooseWebDir(CommandLine line, String webDir) {
         return webDir;
     }

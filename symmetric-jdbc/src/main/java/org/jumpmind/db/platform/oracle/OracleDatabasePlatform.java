@@ -23,6 +23,7 @@ import javax.sql.DataSource;
 
 import org.apache.commons.lang.StringUtils;
 import org.jumpmind.db.model.Column;
+import org.jumpmind.db.model.Table;
 import org.jumpmind.db.platform.AbstractJdbcDatabasePlatform;
 import org.jumpmind.db.platform.DatabaseNamesConstants;
 import org.jumpmind.db.platform.PermissionResult;
@@ -108,7 +109,7 @@ public class OracleDatabasePlatform extends AbstractJdbcDatabasePlatform {
            
        	String triggerSql = "CREATE OR REPLACE TRIGGER TEST_TRIGGER AFTER UPDATE ON " + delimiter + PERMISSION_TEST_TABLE_NAME + delimiter + " BEGIN END";	
        	
-       	PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, Status.FAIL);
+       	PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, triggerSql);
        	
    		try {
    			getSqlTemplate().update(triggerSql);
@@ -128,7 +129,7 @@ public class OracleDatabasePlatform extends AbstractJdbcDatabasePlatform {
            
         String executeSql = "SELECT DBMS_LOB.GETLENGTH('TEST'), UTL_RAW.CAST_TO_RAW('TEST') FROM DUAL";  
         
-        PermissionResult result = new PermissionResult(PermissionType.EXECUTE, Status.FAIL);
+        PermissionResult result = new PermissionResult(PermissionType.EXECUTE, executeSql);
         
         try {
             getSqlTemplate().update(executeSql);
@@ -140,5 +141,11 @@ public class OracleDatabasePlatform extends AbstractJdbcDatabasePlatform {
         
         return result;
     }
-    
+
+    @Override
+    public long getEstimatedRowCount(Table table) {
+        return getSqlTemplateDirty().queryForLong("select nvl(num_rows, -1) from all_tables where table_name = ? and owner = ?",
+                table.getName(), table.getSchema());
+    }
+
 }

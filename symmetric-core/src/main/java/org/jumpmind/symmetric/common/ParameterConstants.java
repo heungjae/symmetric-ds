@@ -48,6 +48,8 @@ final public class ParameterConstants {
     public final static String AUTO_START_ENGINE = "auto.start.engine";
 
     public final static String JDBC_EXECUTE_BATCH_SIZE = "db.jdbc.execute.batch.size";
+    public final static String JDBC_EXECUTE_BULK_BATCH_SIZE = "db.jdbc.bulk.execute.batch.size";
+    public final static String JDBC_EXECUTE_BULK_BATCH_OVERRIDE = "db.jdbc.bulk.execute.batch.override";
     public final static String JDBC_READ_STRINGS_AS_BYTES = "db.read.strings.as.bytes";
     public final static String JDBC_ISOLATION_LEVEL = "db.jdbc.isolation.level";
 
@@ -157,6 +159,8 @@ final public class ParameterConstants {
     public final static String INITIAL_LOAD_SCHEMA_DUMP_COMMAND = "initial.load.schema.dump.command";
     public final static String INITIAL_LOAD_SCHEMA_LOAD_COMMAND = "initial.load.schema.load.command";
     public final static String INITIAL_LOAD_EXTRACT_AND_SEND_WHEN_STAGED = "initial.load.extract.and.send.when.staged";
+    public final static String INITIAL_LOAD_TRANSPORT_MAX_BYTES_TO_SYNC = "initial.load.transport.max.bytes.to.sync";
+    public final static String INITIAL_LOAD_USE_ESTIMATED_COUNTS = "initial.load.use.estimated.counts";
     
     public final static String CREATE_TABLE_WITHOUT_DEFAULTS = "create.table.without.defaults";
     public final static String CREATE_TABLE_WITHOUT_FOREIGN_KEYS = "create.table.without.foreign.keys";
@@ -167,6 +171,7 @@ final public class ParameterConstants {
     public final static String STREAM_TO_FILE_ENABLED = "stream.to.file.enabled";
     public final static String STREAM_TO_FILE_THRESHOLD = "stream.to.file.threshold.bytes";
     public final static String STREAM_TO_FILE_TIME_TO_LIVE_MS = "stream.to.file.ttl.ms";
+    public final static String STREAM_TO_FILE_MIN_TIME_TO_LIVE_MS = "stream.to.file.min.ttl.ms";    
     public final static String STREAM_TO_FILE_PURGE_ON_TTL_ENABLED = "stream.to.file.purge.on.ttl.enabled";
 
     public final static String PARAMETER_REFRESH_PERIOD_IN_MS = "parameter.reload.timeout.ms";
@@ -186,6 +191,7 @@ final public class ParameterConstants {
     public final static String ROUTING_LARGEST_GAP_SIZE = "routing.largest.gap.size";
 //    public final static String ROUTING_DATA_READER_TYPE_GAP_RETENTION_MINUTES = "routing.data.reader.type.gap.retention.period.minutes";
     public final static String ROUTING_DATA_READER_ORDER_BY_DATA_ID_ENABLED = "routing.data.reader.order.by.gap.id.enabled";
+    public final static String ROUTING_DATA_READER_INTO_MEMORY_ENABLED = "routing.data.reader.into.memory.enabled";
     public final static String ROUTING_DATA_READER_THRESHOLD_GAPS_TO_USE_GREATER_QUERY = "routing.data.reader.threshold.gaps.to.use.greater.than.query";
     public final static String ROUTING_LOG_STATS_ON_BATCH_ERROR = "routing.log.stats.on.batch.error";
     public final static String ROUTING_COLLECT_STATS_UNROUTED = "routing.collect.stats.unrouted";
@@ -222,6 +228,9 @@ final public class ParameterConstants {
     public final static String DBDIALECT_ORACLE_USE_TRANSACTION_VIEW = "oracle.use.transaction.view";
     public final static String DBDIALECT_ORACLE_TEMPLATE_NUMBER_SPEC = "oracle.template.precision";
     public final static String DBDIALECT_ORACLE_USE_HINTS = "oracle.use.hints";
+    public final static String DBDIALECT_ORACLE_USE_SELECT_START_DATA_ID_HINT = "oracle.use.select.data.using.start.data.id.hint";
+    public final static String DBDIALECT_ORACLE_SEQUENCE_NOORDER = "oracle.sequence.noorder";
+    public final static String DBDIALECT_ORACLE_SEQUENCE_NOORDER_NEXTVALUE_DB_URLS = "oracle.sequence.noorder.nextvalue.db.urls";
 
     public final static String DBDIALECT_TIBERO_USE_TRANSACTION_VIEW = "tibero.use.transaction.view";
     public final static String DBDIALECT_TIBERO_TEMPLATE_NUMBER_SPEC = "tibero.template.precision";
@@ -281,6 +290,7 @@ final public class ParameterConstants {
 
     public final static String CLUSTER_SERVER_ID = "cluster.server.id";
     public final static String CLUSTER_LOCKING_ENABLED = "cluster.lock.enabled";
+    public final static String CLUSTER_STAGING_ENABLED = "cluster.staging.enabled";
     public final static String CLUSTER_LOCK_TIMEOUT_MS = "cluster.lock.timeout.ms";
     public final static String CLUSTER_LOCK_REFRESH_MS = "cluster.lock.refresh.ms";
     public final static String LOCK_TIMEOUT_MS = "lock.timeout.ms";
@@ -295,7 +305,9 @@ final public class ParameterConstants {
     public final static String PURGE_MAX_NUMBER_OF_DATA_IDS = "job.purge.max.num.data.to.delete.in.tx";
     public final static String PURGE_MAX_NUMBER_OF_BATCH_IDS = "job.purge.max.num.batches.to.delete.in.tx";
     public final static String PURGE_MAX_NUMBER_OF_EVENT_BATCH_IDS = "job.purge.max.num.data.event.batches.to.delete.in.tx";
-
+    public final static String PURGE_FIRST_PASS = "job.purge.first.pass";
+    public final static String PURGE_FIRST_PASS_OUTSTANDING_BATCHES_THRESHOLD = "job.purge.first.pass.outstanding.batches.threshold";
+    
     public final static String JMX_LINE_FEED = "jmx.line.feed";
 
     public final static String IP_FILTERS = "ip.filters";
@@ -419,6 +431,8 @@ final public class ParameterConstants {
     public final static String UPDATE_SERVICE_CLASS = "update.service.class";
     
     public final static String STAGING_MANAGER_CLASS = "staging.manager.class";
+    
+    public final static String STAGING_DIR = "staging.dir";
 
     public final static String STATISTIC_MANAGER_CLASS = "statistic.manager.class";
 
@@ -426,8 +440,23 @@ final public class ParameterConstants {
     
     public final static String TREAT_BINARY_AS_LOB_ENABLED = "treat.binary.as.lob.enabled";
     
+    public final static String RIGHT_TRIM_CHAR_VALUES = "right.trim.char.values";
+    
+    public final static String ALLOW_UPDATES_WITH_RESULTS = "allow.updates.with.results";
+    
     public final static String NODE_LOAD_ONLY = "load.only";
     
+    public final static String MYSQL_TINYINT_DDL_TO_BOOLEAN = "mysql.tinyint.ddl.to.boolean";
+    
+    public static final String LOAD_ONLY_PROPERTY_PREFIX = "target.";
+    
+    public final static String KAFKA_PRODUCER = "kafka.producer";
+    public final static String KAFKA_FORMAT = "kafka.format";
+    public final static String KAFKA_MESSAGE_BY = "kafka.message.by";
+    public final static String KAFKA_TOPIC_BY = "kafka.topic.by";
+    public final static String KAFKA_CONFLUENT_REGISTRY_URL = "kafka.confluent.registry.url";
+    public final static String KAFKA_AVRO_JAVA_PACKAGE = "kafka.avro.java.package";
+    		
     public static Map<String, ParameterMetaData> getParameterMetaData() {
         return parameterMetaData;
     }

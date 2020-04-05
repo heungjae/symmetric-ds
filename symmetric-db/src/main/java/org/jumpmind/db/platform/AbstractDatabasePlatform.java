@@ -31,14 +31,7 @@ import java.math.BigInteger;
 import java.sql.Array;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TimeZone;
+import java.util.*;
 import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
@@ -83,6 +76,7 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
 
     public static final String REQUIRED_FIELD_NULL_SUBSTITUTE = " ";
 
+    public static final String ZERO_DATE_STRING = "0000-00-00 00:00:00";
     /*
      * The default name for models read from the database, if no name as given.
      */
@@ -95,7 +89,7 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
 
     protected IDdlBuilder ddlBuilder;
 
-    protected Map<String, Table> tableCache = new HashMap<String, Table>();
+    protected Map<String, Table> tableCache = Collections.synchronizedMap(new HashMap<String, Table>());
 
     private long lastTimeCachedModelClearedInMs = System.currentTimeMillis();
 
@@ -315,10 +309,8 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
     }
 
     public void resetCachedTableModel() {
-        synchronized (this.getClass()) {
-            this.tableCache = new HashMap<String, Table>();
-            lastTimeCachedModelClearedInMs = System.currentTimeMillis();
-        }
+        this.tableCache = Collections.synchronizedMap(new HashMap<String, Table>());
+        lastTimeCachedModelClearedInMs = System.currentTimeMillis();
     }
 
     public Table getTableFromCache(String tableName, boolean forceReread) {
@@ -333,16 +325,14 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
         String key = Table.getFullyQualifiedTableName(catalogName, schemaName, tableName);
         Table retTable = model != null ? model.get(key) : null;
         if (retTable == null || forceReread) {
-            synchronized (this.getClass()) {
-                try {
-                    Table table = readTableFromDatabase(catalogName, schemaName, tableName);
-                    tableCache.put(key, table);
-                    retTable = table;
-                } catch (RuntimeException ex) {
-                    throw ex;
-                } catch (Exception ex) {
-                    throw new RuntimeException(ex);
-                }
+            try {
+                Table table = readTableFromDatabase(catalogName, schemaName, tableName);
+                tableCache.put(key, table);
+                retTable = table;
+            } catch (RuntimeException ex) {
+                throw ex;
+            } catch (Exception ex) {
+                throw new RuntimeException(ex);
             }
         }
         return retTable;
@@ -402,7 +392,7 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
                 String charValue = value.toString();
                 if ((StringUtils.isBlank(charValue) && getDdlBuilder().getDatabaseInfo().isBlankCharColumnSpacePadded())
                         || (StringUtils.isNotBlank(charValue) && getDdlBuilder().getDatabaseInfo().isNonBlankCharColumnSpacePadded())) {
-                    objectValue = StringUtils.rightPad(value.toString(), column.getSizeAsInt(), ' ');
+                    objectValue = StringUtils.rightPad(charValue, column.getSizeAsInt(), ' ');
                 }
             } else if (type == Types.BIGINT) {
                 objectValue = parseBigInteger(value);
@@ -433,6 +423,11 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
         if (objectValue instanceof String) {
             String stringValue = cleanTextForTextBasedColumns((String) objectValue);
             int size = column.getSizeAsInt();
+            
+            if(settings.isRightTrimCharValues()){
+            	stringValue = StringUtils.stripEnd(stringValue, null);
+            }
+            
             if (fitToColumn && size > 0 && stringValue.length() > size) {
                 stringValue = stringValue.substring(0, size);
             }
@@ -874,6 +869,9 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
         try {
             return Timestamp.valueOf(value);
         } catch (IllegalArgumentException ex) {
+        	if (!getDatabaseInfo().isZeroDateAllowed() && value != null && value.startsWith(ZERO_DATE_STRING)) {
+        		return null;
+        	}
             try {
                 return new Timestamp(FormatUtils.parseDate(value, FormatUtils.TIMESTAMP_PATTERNS).getTime());
             } catch (Exception e) {
@@ -958,7 +956,19 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
         if (drop) {
             results.add(dropPermission);
         }
+        
+        logFailedResults(results);
+        
         return results;
+    }
+
+    protected void logFailedResults(List<PermissionResult> results) {
+        for (PermissionResult result : results) {
+            if (Status.FAIL == result.getStatus()) {
+                log.info(String.format("Database permission check failed. Category: %s Permission Type: %s Details:\r\n%s", result.getCategory(), result.getPermissionType(),  
+                        result.getTestDetails()), result.getException());
+            }
+        }
     }
 
     protected Table getPermissionTableDefinition() {
@@ -971,8 +981,10 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
 
     protected PermissionResult getCreateSymTablePermission(Database database) {
         Table table = getPermissionTableDefinition();
+        
+        String createSql = ddlBuilder.createTables(database, false);
 
-        PermissionResult result = new PermissionResult(PermissionType.CREATE_TABLE, Status.FAIL);
+        PermissionResult result = new PermissionResult(PermissionType.CREATE_TABLE, createSql);
         getDropSymTablePermission();
 
         try {
@@ -990,7 +1002,7 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
     protected PermissionResult getDropSymTablePermission() {
         Table table = getPermissionTableDefinition();
 
-        PermissionResult result = new PermissionResult(PermissionType.DROP_TABLE, Status.FAIL);
+        PermissionResult result = new PermissionResult(PermissionType.DROP_TABLE, "dropping table " + table.getName() + "...");
 
         try {
             if (getTableFromCache(table.getName(), true) != null) {
@@ -1020,7 +1032,7 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
         Table table = new Table(PERMISSION_TEST_TABLE_NAME, idColumn, valueColumn);
         Table alterTable = new Table(PERMISSION_TEST_TABLE_NAME, idColumn, valueColumn, alterColumn);
 
-        PermissionResult result = new PermissionResult(PermissionType.ALTER_TABLE, Status.FAIL);
+        PermissionResult result = new PermissionResult(PermissionType.ALTER_TABLE, "altering table " + PERMISSION_TEST_TABLE_NAME + "...");
 
         try {
             database.removeAllTablesExcept();
@@ -1040,7 +1052,7 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
 
     protected PermissionResult getDropSymTriggerPermission() {
         String dropTriggerSql = "DROP TRIGGER TEST_TRIGGER";
-        PermissionResult result = new PermissionResult(PermissionType.DROP_TRIGGER, Status.FAIL);
+        PermissionResult result = new PermissionResult(PermissionType.DROP_TRIGGER, dropTriggerSql);
 
         try {
             getSqlTemplate().update(dropTriggerSql);
@@ -1054,22 +1066,26 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
     }
 
     protected PermissionResult getCreateSymTriggerPermission() {
-        PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, Status.UNIMPLEMENTED);
+        PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, "UNIMPLEMENTED");
+        result.setStatus(Status.UNIMPLEMENTED);
         return result;
     }
 
     protected PermissionResult getExecuteSymPermission() {
-        PermissionResult result = new PermissionResult(PermissionType.EXECUTE, Status.NOT_APPLICABLE);
+        PermissionResult result = new PermissionResult(PermissionType.EXECUTE, "NOT_APPLICABLE");
+        result.setStatus(Status.NOT_APPLICABLE);
         return result;
     }
 
     protected PermissionResult getCreateSymRoutinePermission() {
-        PermissionResult result = new PermissionResult(PermissionType.CREATE_ROUTINE, Status.NOT_APPLICABLE);
+        PermissionResult result = new PermissionResult(PermissionType.CREATE_ROUTINE, "NOT_APPLICABLE");
+        result.setStatus(Status.NOT_APPLICABLE);
         return result;
     }
 
     protected PermissionResult getCreateSymFunctionPermission() {
-        PermissionResult result = new PermissionResult(PermissionType.CREATE_FUNCTION, Status.NOT_APPLICABLE);
+        PermissionResult result = new PermissionResult(PermissionType.CREATE_FUNCTION, "NOT_APPLICABLE");
+        result.setStatus(Status.NOT_APPLICABLE);
         return result;
     }
 
@@ -1092,4 +1108,16 @@ public abstract class AbstractDatabasePlatform implements IDatabasePlatform {
         }
         return supportsTransactions;
     }
+    
+    public long getEstimatedRowCount(Table table) {
+        DatabaseInfo dbInfo = getDatabaseInfo();
+        String quote = dbInfo.getDelimiterToken();
+        String catalogSeparator = dbInfo.getCatalogSeparator();
+        String schemaSeparator = dbInfo.getSchemaSeparator();
+        
+        String sql = String.format("select count(*) from %s", table.getQualifiedTableName(quote, catalogSeparator, schemaSeparator));
+        
+        return getSqlTemplateDirty().queryForLong(sql);
+    }
+
 }

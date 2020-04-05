@@ -30,6 +30,7 @@ import javax.sql.rowset.serial.SerialBlob;
 
 import org.apache.commons.lang.StringUtils;
 import org.jumpmind.db.model.Column;
+import org.jumpmind.db.model.Table;
 import org.jumpmind.db.platform.AbstractJdbcDatabasePlatform;
 import org.jumpmind.db.platform.DatabaseNamesConstants;
 import org.jumpmind.db.platform.PermissionResult;
@@ -206,7 +207,7 @@ public class PostgreSqlDatabasePlatform extends AbstractJdbcDatabasePlatform {
            
        	String triggerSql = "CREATE OR REPLACE FUNCTION TEST_TRIGGER() RETURNS trigger AS $$ BEGIN END $$ LANGUAGE plpgsql";
 
-       	PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, Status.FAIL);
+       	PermissionResult result = new PermissionResult(PermissionType.CREATE_TRIGGER, triggerSql);
    		
    		try {
    			getSqlTemplate().update(triggerSql);
@@ -223,7 +224,7 @@ public class PostgreSqlDatabasePlatform extends AbstractJdbcDatabasePlatform {
    	public PermissionResult getDropSymTriggerPermission() {
        	String dropTriggerSql = "DROP FUNCTION TEST_TRIGGER()";
 
-       	PermissionResult result = new PermissionResult(PermissionType.DROP_TRIGGER, PermissionResult.Status.FAIL);
+       	PermissionResult result = new PermissionResult(PermissionType.DROP_TRIGGER, dropTriggerSql);
    		
    		try {
    			getSqlTemplate().update(dropTriggerSql);
@@ -234,5 +235,12 @@ public class PostgreSqlDatabasePlatform extends AbstractJdbcDatabasePlatform {
    		
    		return result;
     }    
-    
+
+    @Override
+    public long getEstimatedRowCount(Table table) {        
+        return getSqlTemplateDirty().queryForLong("select coalesce(c.reltuples, -1) from pg_catalog.pg_class c inner join pg_catalog.pg_namespace n " +
+                "on n.oid = c.relnamespace where c.relname = ? and n.nspname = ?",
+                table.getName(), table.getSchema());
+    }
+
 }

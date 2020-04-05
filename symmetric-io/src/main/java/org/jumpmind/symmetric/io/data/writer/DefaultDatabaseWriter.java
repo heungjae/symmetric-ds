@@ -40,6 +40,7 @@ import org.jumpmind.db.model.Table;
 import org.jumpmind.db.model.TypeMap;
 import org.jumpmind.db.platform.DatabaseInfo;
 import org.jumpmind.db.platform.IDatabasePlatform;
+import org.jumpmind.db.sql.DataTruncationException;
 import org.jumpmind.db.sql.DmlStatement;
 import org.jumpmind.db.sql.DmlStatement.DmlType;
 import org.jumpmind.db.sql.ISqlRowMapper;
@@ -73,6 +74,8 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
     protected DmlStatement currentDmlStatement;
     
     protected Object[] currentDmlValues;
+    
+    protected LogSqlBuilder logSqlBuilder = new LogSqlBuilder();
 
     public DefaultDatabaseWriter(IDatabasePlatform platform) {
         this(platform, null, null);
@@ -193,7 +196,7 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
                 if (log.isDebugEnabled()) {
                     log.debug("Preparing dml: " + this.currentDmlStatement.getSql());
                 }
-                getTransaction().prepare(this.currentDmlStatement.getSql());
+                prepare();
             }
             try {
                 Conflict conflict = writerSettings.pickConflict(this.targetTable, batch);
@@ -316,7 +319,7 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
                 if (log.isDebugEnabled()) {
                     log.debug("Preparing dml: " + this.currentDmlStatement.getSql());
                 }
-                getTransaction().prepare(this.currentDmlStatement.getSql());
+                prepare();
             }
             try {
                 lookupDataMap = lookupDataMap == null ? getLookupDataMap(data, conflict) : lookupDataMap;
@@ -472,8 +475,7 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
                     if (log.isDebugEnabled()) {
                         log.debug("Preparing dml: " + this.currentDmlStatement.getSql());
                     }
-                    getTransaction().prepare(this.currentDmlStatement.getSql());
-
+                    prepare();
                 }
 
                 rowData = (String[]) changedColumnValueList
@@ -548,7 +550,7 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
             statistics.get(batch).increment(DataWriterStatisticConstants.CREATECOUNT);
             return true;
         } catch (RuntimeException ex) {
-            log.error("Failed to alter table using the following xml: {}", xml);
+            log.error("Failed to alter table using the following xml: " + xml, ex); // This is not logged upstream
             throw ex;
         } finally {
             statistics.get(batch).stopTimer(DataWriterStatisticConstants.LOADMILLIS);
@@ -565,11 +567,11 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
             for (String sql : sqlStatements) {
                 try {
                     sql = preprocessSqlStatement(sql);
-                    getTransaction().prepare(sql);
+                    prepare(sql, data);
                     if (log.isDebugEnabled()) {
                         log.debug("About to run: {}", sql);
                     }
-                    count += getTransaction().prepareAndExecute(sql);
+                    count += prepareAndExecute(sql, data);
                     if (log.isDebugEnabled()) {
                         log.debug("{} rows updated when running: {}", count, sql);
                     }
@@ -688,11 +690,17 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
         
         if (logLastDmlDetails && this.currentDmlStatement != null) {
             failureMessage.append("Failed sql was: ");
-            failureMessage.append(this.currentDmlStatement.getSql());
+            String dynamicSQL = logSqlBuilder.buildDynamicSqlForLog(this.currentDmlStatement.getSql(), currentDmlValues, this.currentDmlStatement.getTypes());
+            failureMessage.append(dynamicSQL);
+            if (!dynamicSQL.equals(this.currentDmlStatement.getSql())) {                
+                failureMessage.append("\n");
+                failureMessage.append("Failed raw sql was: ");
+                failureMessage.append(this.currentDmlStatement.getSql());
+            }
             failureMessage.append("\n");
         }
         
-        if (logLastDmlDetails && this.currentDmlValues != null) {
+        if (logLastDmlDetails && this.currentDmlValues != null && this.currentDmlStatement != null) {
             failureMessage.append("Failed sql parameters: ");
             failureMessage.append(StringUtils.abbreviate("[" + dmlValuesToString(currentDmlValues, this.currentDmlStatement.getTypes()) + "]", 
                     CsvData.MAX_DATA_SIZE_TO_PRINT_TO_LOG));
@@ -709,9 +717,32 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
             failureMessage.append("\n");
         }
 
+        if (e instanceof DataTruncationException) {
+        		logDataTruncation(data, failureMessage);
+        }
         data.writeCsvDataDetails(failureMessage);
         
         log.info(failureMessage.toString(), e);
+    }
+    
+    protected void logDataTruncation(CsvData data, StringBuilder failureMessage) {
+    		String[] rowData = data.getParsedData(CsvData.ROW_DATA);
+    		int rowIndex = 0;
+    		for (Column col : targetTable.getColumns()) {
+    			if (col.getJdbcTypeCode() == Types.VARCHAR) { // CHAR
+    				if (rowData[rowIndex].length() > Integer.parseInt(col.getSize())) {
+    					failureMessage.append("Failed truncation column: ");
+    					failureMessage.append(col.getName());
+    					failureMessage.append(" with size of: ");
+    					failureMessage.append(Integer.parseInt(col.getSize()));
+    					failureMessage.append(" failed to load data: ");
+    					failureMessage.append(rowData[rowIndex]);
+    					failureMessage.append("\n");
+    				}
+    			}
+    			
+    			rowIndex++;
+    		}
     }
     
     protected String dmlValuesToString(Object[] dmlValues, int[] types) {
@@ -854,6 +885,14 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
         return needsUpdated;
     }
 
+    protected void prepare() {
+    		getTransaction().prepare(this.currentDmlStatement.getSql());
+    }
+    
+    protected void prepare(String sql, CsvData data) {
+    		getTransaction().prepare(sql);
+    }
+    
     protected int execute(CsvData data, String[] values) {
         currentDmlValues = getPlatform().getObjectValues(batch.getBinaryEncoding(), values,
                 currentDmlStatement.getMetaData(), false, writerSettings.isFitToColumn());
@@ -911,6 +950,10 @@ public class DefaultDatabaseWriter extends AbstractDatabaseWriter {
     public DatabaseWriterSettings getWriterSettings() {
         return writerSettings;
     }
+    
+    public int prepareAndExecute(String sql, CsvData data) {
+    		return getTransaction().prepareAndExecute(sql);
+    	}
     
     protected String getCurData(ISqlTransaction transaction) {
         String curVal = null;

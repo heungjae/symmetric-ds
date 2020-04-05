@@ -45,10 +45,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -61,8 +63,11 @@ import org.apache.commons.lang.time.DurationFormatUtils;
 import org.jumpmind.db.io.DatabaseXmlUtil;
 import org.jumpmind.db.model.Column;
 import org.jumpmind.db.model.Database;
+import org.jumpmind.db.model.ForeignKey;
 import org.jumpmind.db.model.PlatformColumn;
+import org.jumpmind.db.model.Reference;
 import org.jumpmind.db.model.Table;
+import org.jumpmind.db.platform.DatabaseInfo;
 import org.jumpmind.db.platform.DatabaseNamesConstants;
 import org.jumpmind.db.platform.DdlBuilderFactory;
 import org.jumpmind.db.platform.IDdlBuilder;
@@ -108,6 +113,7 @@ import org.jumpmind.symmetric.io.stage.IStagedResource;
 import org.jumpmind.symmetric.io.stage.IStagedResource.State;
 import org.jumpmind.symmetric.io.stage.IStagingManager;
 import org.jumpmind.symmetric.io.stage.StagingFileLock;
+import org.jumpmind.symmetric.load.IReloadVariableFilter;
 import org.jumpmind.symmetric.model.AbstractBatch.Status;
 import org.jumpmind.symmetric.model.Channel;
 import org.jumpmind.symmetric.model.ChannelMap;
@@ -142,6 +148,7 @@ import org.jumpmind.symmetric.service.IClusterService;
 import org.jumpmind.symmetric.service.IConfigurationService;
 import org.jumpmind.symmetric.service.IDataExtractorService;
 import org.jumpmind.symmetric.service.IDataService;
+import org.jumpmind.symmetric.service.IExtensionService;
 import org.jumpmind.symmetric.service.INodeCommunicationService;
 import org.jumpmind.symmetric.service.INodeCommunicationService.INodeCommunicationExecutor;
 import org.jumpmind.symmetric.service.INodeService;
@@ -196,8 +203,10 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
     private INodeCommunicationService nodeCommunicationService;
 
     private IClusterService clusterService;
+    
+    private IExtensionService extensionService;
 
-    private Map<String, BatchLock> locks = new HashMap<String, BatchLock>();
+    private Map<String, BatchLock> locks = new ConcurrentHashMap<String, BatchLock>();
     
     private CustomizableThreadFactory threadPoolFactory;
 
@@ -215,6 +224,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
         this.nodeCommunicationService = engine.getNodeCommunicationService();
         this.clusterService = engine.getClusterService();
         this.sequenceService = engine.getSequenceService();
+        this.extensionService = engine.getExtensionService();
         setSqlMap(new DataExtractorServiceSqlMap(symmetricDialect.getPlatform(),
                 createSqlReplacementTokens()));
     }
@@ -235,15 +245,17 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                 TableConstants.SYM_TABLE_RELOAD_REQUEST, TableConstants.SYM_MONITOR_EVENT, TableConstants.SYM_CONSOLE_EVENT);
     }
     
-    protected boolean filter(Node targetNode, String tableName) {
-        
+    protected boolean filter(Node targetNode, String tableName) {        
         boolean pre37 = Version.isOlderThanVersion(targetNode.getSymmetricVersionParts(), Version.VERSION_3_7_0);
         boolean pre38 = Version.isOlderThanVersion(targetNode.getSymmetricVersionParts(), Version.VERSION_3_8_0);
         boolean pre3818 = Version.isOlderThanVersion(targetNode.getSymmetricVersionParts(), Version.VERSION_3_8_18);
+        boolean pre39 =  Version.isOlderThanVersion(targetNode.getSymmetricVersionParts(), Version.VERSION_3_9_0);
 
         tableName = tableName.toLowerCase();
         boolean include = true;
-        if (pre37 && tableName.contains(TableConstants.SYM_EXTENSION)) {
+        if (pre39 && tableName.contains(TableConstants.SYM_JOB)) {
+            include = false;
+        } else if (pre37 && tableName.contains(TableConstants.SYM_EXTENSION)) {
             include = false;
         } else if (pre38 && (tableName.contains(TableConstants.SYM_MONITOR) || 
                 tableName.contains(TableConstants.SYM_NOTIFICATION))) {
@@ -526,24 +538,9 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
             routerService.routeData(true);
         }
         
-        OutgoingBatches batches = null;
-        if (queue != null) {
-            NodeGroupLinkAction defaultAction = configurationService.getNodeGroupLinkFor(nodeService.findIdentity().getNodeGroupId(),
-                    targetNode.getNodeGroupId(), false).getDataEventAction();
-            ProcessType processType = extractInfo.getKey().getProcessType();
-            NodeGroupLinkAction action = null;
+        OutgoingBatches batches = loadPendingBatches(extractInfo, targetNode, queue, transport);
 
-            if (processType.equals(ProcessType.PUSH_JOB_EXTRACT)) {
-                action = NodeGroupLinkAction.P;
-            } else if (processType.equals(ProcessType.PULL_HANDLER_EXTRACT)) {
-                action = NodeGroupLinkAction.W;
-            }
-            batches = outgoingBatchService.getOutgoingBatches(targetNode.getNodeId(), queue, action, defaultAction, false);
-        } else {
-            batches = outgoingBatchService.getOutgoingBatches(targetNode.getNodeId(), false);
-        }
-
-        if (batches.containsBatches()) {
+        if (batches != null && batches.containsBatches()) {
 
             ChannelMap channelMap = transport.getSuspendIgnoreChannelLists(configurationService, queue,
                     targetNode);
@@ -562,6 +559,67 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
 
         return Collections.emptyList();
 
+    }
+
+    protected OutgoingBatches loadPendingBatches(ProcessInfo extractInfo, Node targetNode, String queue, IOutgoingTransport transport) {
+        
+        BufferedWriter writer = transport.getWriter();         
+        
+        Callable<OutgoingBatches> getOutgoingBatches = () -> {                            
+            OutgoingBatches batches = null;
+            if (queue != null) {
+                NodeGroupLink link = configurationService.getNodeGroupLinkFor(nodeService.findIdentity().getNodeGroupId(),
+                        targetNode.getNodeGroupId(), false);
+                if (link != null) {
+                    NodeGroupLinkAction defaultAction = configurationService.getNodeGroupLinkFor(nodeService.findIdentity().getNodeGroupId(),
+                            targetNode.getNodeGroupId(), false).getDataEventAction();
+                    ProcessType processType = extractInfo.getKey().getProcessType();
+                    NodeGroupLinkAction action = null;
+                    
+                    if (processType.equals(ProcessType.PUSH_JOB_EXTRACT)) {
+                        action = NodeGroupLinkAction.P;
+                    } else if (processType.equals(ProcessType.PULL_HANDLER_EXTRACT)) {
+                        action = NodeGroupLinkAction.W;
+                    }
+                    batches = outgoingBatchService.getOutgoingBatches(targetNode.getNodeId(), queue, action, defaultAction, false);
+                } else {
+                    log.error("Group link not found for " + nodeService.findIdentity().getNodeGroupId() +
+                            " to " + targetNode.getNodeGroupId() + ".  Check that configuration matches on both nodes.");
+                }
+            } else {
+                batches = outgoingBatchService.getOutgoingBatches(targetNode.getNodeId(), false);
+            }
+            return batches;
+        };
+        
+        if (writer != null) {
+            final boolean streamToFileEnabled = parameterService.is(ParameterConstants.STREAM_TO_FILE_ENABLED);
+            long keepAliveMillis = parameterService.getLong(ParameterConstants.DATA_LOADER_SEND_ACK_KEEPALIVE);
+            Node sourceNode = nodeService.findIdentity();
+            FutureTask<OutgoingBatches> getOutgoingBatchesTask = new FutureTask<OutgoingBatches>(getOutgoingBatches);            
+            ExecutorService executor = Executors.newFixedThreadPool(1);
+            executor.execute(getOutgoingBatchesTask);
+            
+            try {                
+                while (true) {                
+                    try {
+                        return getOutgoingBatchesTask.get(keepAliveMillis, TimeUnit.MILLISECONDS);
+                    } catch (TimeoutException ex) {
+                        writeKeepAliveAck(writer, sourceNode, streamToFileEnabled);
+                    } catch (Exception ex) {
+                        throw new SymmetricException("Failed to execute getOutgoingBatchesTask ", ex);
+                    }
+                }
+            } finally {
+                executor.shutdown();
+            }
+        } else {
+            try {                
+                return getOutgoingBatches.call();
+            } catch (Exception ex) {
+                throw new SymmetricException("Failed to execute getOutgoingBatchesTask ", ex);
+            }
+        }
     }
     
     /**
@@ -619,10 +677,10 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                                         
                     channelsProcessed.add(currentBatch.getChannelId());
                     
-                    currentBatch = requeryIfEnoughTimeHasPassed(batchesSelectedAtMs, currentBatch);
                     final OutgoingBatch extractBatch = currentBatch;
                     Callable<FutureOutgoingBatch> callable = () -> {
-                        return extractBatch(extractBatch, status, extractInfo, targetNode, dataWriter, mode, activeBatches);                            
+                        OutgoingBatch refreshedBatch = requeryIfEnoughTimeHasPassed(batchesSelectedAtMs, extractBatch);
+                        return extractBatch(refreshedBatch, status, extractInfo, targetNode, dataWriter, mode, activeBatches);                            
                     };
                     
                     if (status.shouldExtractSkip) {
@@ -658,6 +716,9 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                     }
                 }
 
+                final long initialLoadMaxBytesToSync = parameterService.getLong(ParameterConstants.INITIAL_LOAD_TRANSPORT_MAX_BYTES_TO_SYNC);
+                long totalBytesSend = 0;
+                boolean logMaxBytesReached = false;
                 Iterator<OutgoingBatch> activeBatchIter = activeBatches.iterator();                
                 for (int i = 0; i < futures.size(); i++) {
                     Future<FutureOutgoingBatch> future = futures.get(i);
@@ -684,12 +745,27 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                             }
 
                             if (streamToFileEnabled || mode == ExtractMode.FOR_PAYLOAD_CLIENT || (currentBatch.isExtractJobFlag() && parameterService.is(ParameterConstants.INITIAL_LOAD_USE_EXTRACT_JOB))) {
+                                
+                                if(totalBytesSend > initialLoadMaxBytesToSync) {
+                                    if(!logMaxBytesReached) {
+                                        logMaxBytesReached = true;
+                                        log.info(
+                                                "Reached the total byte threshold for initial load after {} of {} batches were sent for node '{}' (sent {} bytes, the max is {}).  "
+                                                        + "The remaining batches will be send on a subsequent sync.",
+                                                new Object[] { i, futures.size(), targetNode.getNodeId(), totalBytesSend, initialLoadMaxBytesToSync });
+                                    }
+                                    transferInfo.setStatus(ProcessStatus.OK);
+                                    break;
+                                }
+                                
                                 transferInfo.setStatus(ProcessInfo.ProcessStatus.TRANSFERRING);
                                 transferInfo.setCurrentLoadId(currentBatch.getLoadId());
                                 boolean isRetry = extractBatch.isRetry() && extractBatch.getOutgoingBatch().getStatus() != OutgoingBatch.Status.IG;
                                 
                                 currentBatch = sendOutgoingBatch(transferInfo, targetNode, currentBatch, isRetry, 
                                         dataWriter, writer, mode);                                
+                                
+                                totalBytesSend += currentBatch.getByteCount();
                             }
                             
                             processedBatches.add(currentBatch);
@@ -958,6 +1034,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                             currentBatch.setDataInsertRowCount(stats.get(DataWriterStatisticConstants.INSERTCOUNT));
                             currentBatch.setDataUpdateRowCount(stats.get(DataWriterStatisticConstants.UPDATECOUNT));
                             currentBatch.setDataDeleteRowCount(stats.get(DataWriterStatisticConstants.DELETECOUNT));
+                            currentBatch.setTransformExtractMillis(transformTimeInMs);
                             extractTimeInMs = extractTimeInMs - transformTimeInMs;
                             byteCount = stats.get(DataWriterStatisticConstants.BYTECOUNT);
                             statisticManager.incrementDataBytesExtracted(currentBatch.getChannelId(), byteCount);
@@ -978,19 +1055,23 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                         resource.delete();
                     }
                     throw ex;
-                } finally {                    
-                    IStagedResource resource = getStagedResource(currentBatch);
-                    if (resource != null) {
-                        resource.setState(State.DONE);
+                } finally { 
+                    try {                        
+                        IStagedResource resource = getStagedResource(currentBatch);
+                        if (resource != null) {
+                            resource.setState(State.DONE);
+                        }
+                    } finally {                        
+                        releaseLock(lock, currentBatch, useStagingDataWriter);
+                        log.debug("{} released lock for batch {}", targetNode.getNodeId(), currentBatch.getBatchId());
                     }
-                    releaseLock(lock, currentBatch, useStagingDataWriter);
-                    log.debug("{} released lock for batch {}", targetNode.getNodeId(), currentBatch.getBatchId());
                 }
             }
 
             if (updateBatchStatistics) {
                 long dataEventCount = currentBatch.getDataRowCount();
                 long insertEventCount = currentBatch.getDataInsertRowCount();
+                
                 currentBatch = requeryIfEnoughTimeHasPassed(ts, currentBatch);
 
                 // preserve in the case of a reload event
@@ -1011,6 +1092,10 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
 
                 if (byteCount > 0) {
                     currentBatch.setByteCount(byteCount);
+                }
+                
+                if (transformTimeInMs > 0) {
+                    currentBatch.setTransformExtractMillis(transformTimeInMs);
                 }
 
             }
@@ -1050,6 +1135,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
             throw new org.jumpmind.exception.InterruptedException(e);
         }
         
+        log.debug("Acquired {}", lock);
         return lock;
     }
 
@@ -1113,9 +1199,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
     
     protected boolean isStagingFileLockRequired(OutgoingBatch batch) {
         return batch.isCommonFlag() 
-                && parameterService.is(ParameterConstants.CLUSTER_LOCKING_ENABLED) 
-                && parameterService.is(ParameterConstants.STREAM_TO_FILE_ENABLED)
-                && parameterService.is(ParameterConstants.INITIAL_LOAD_USE_EXTRACT_JOB);
+                && parameterService.is(ParameterConstants.CLUSTER_STAGING_ENABLED);
     }    
 
     protected void triggerReExtraction(OutgoingBatch currentBatch) {
@@ -1238,28 +1322,37 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                     if (!isRetry && parameterService.is(ParameterConstants.OUTGOING_BATCH_COPY_TO_INCOMING_STAGING) &&
                             !parameterService.is(ParameterConstants.NODE_OFFLINE, false)) {
                         ISymmetricEngine targetEngine = AbstractSymmetricEngine.findEngineByUrl(targetNode.getSyncUrl());
-                        if (targetEngine != null && extractedBatch.isFileResource()) {
+                        
+                        if (targetEngine != null && extractedBatch.isFileResource() && targetEngine.getParameterService().is(ParameterConstants.STREAM_TO_FILE_ENABLED)) {
                             Node sourceNode = nodeService.findIdentity();
-                            IStagedResource targetResource = targetEngine.getStagingManager().create( 
-                                    Constants.STAGING_CATEGORY_INCOMING, Batch.getStagedLocation(false, sourceNode.getNodeId()), 
-                                    currentBatch.getBatchId());
-                            try {
-                                SymmetricUtils.copyFile(extractedBatch.getFile(), targetResource.getFile());
-                                targetResource.setState(State.DONE);
+                            Node targetNodeByEngine = targetEngine.getNodeService().findIdentity();
+                            if(sourceNode.equals(targetNodeByEngine) || !targetNodeByEngine.equals(targetNode)) {
+                            	log.warn("Target engine (NodeId {}) is the same engine as the current one and differs from the correct target (NodeId {}). This looks like a miss configuration of the sync urls '{}'", 
+                            			targetNodeByEngine.getNodeId(), targetNode.getNodeId(), targetNode.getSyncUrl());
+                            } else {
+                            	IStagedResource targetResource = targetEngine.getStagingManager().create( 
+                                        Constants.STAGING_CATEGORY_INCOMING, Batch.getStagedLocation(false, sourceNode.getNodeId()), 
+                                        currentBatch.getBatchId());
+                                try {
+                                    SymmetricUtils.copyFile(extractedBatch.getFile(), targetResource.getFile());
+                                    if(log.isDebugEnabled()) {
+                                    	log.debug("Copied file to incoming staging of remote engine {}", targetResource.getFile().getAbsolutePath());
+                                    }
+                                    
+                                    targetResource.setState(State.DONE);
 
-                                isRetry = true;
-                                
-                                	statisticManager.incrementDataSent(currentBatch.getChannelId(), currentBatch.getDataRowCount());
-                            		statisticManager.incrementDataBytesSent(currentBatch.getChannelId(), extractedBatch.getFile().length());
-                            } catch (Exception e) {   
-                                FileUtils.deleteQuietly(targetResource.getFile());
-                                throw new RuntimeException(e);
+                                    isRetry = true;
+                                    
+                                 if (currentBatch.getSentCount() == 1) {
+	                                	statisticManager.incrementDataSent(currentBatch.getChannelId(), currentBatch.getDataRowCount());
+	                            		statisticManager.incrementDataBytesSent(currentBatch.getChannelId(), extractedBatch.getFile().length());
+                                 }
+                                } catch (Exception e) {   
+                                    FileUtils.deleteQuietly(targetResource.getFile());
+                                    throw new RuntimeException(e);
+                                }
                             }
                         }
-                        statisticManager.incrementDataSent(currentBatch.getChannelId(),
-                                currentBatch.getDataRowCount());
-                        statisticManager.incrementDataBytesSent(currentBatch.getChannelId(), 
-                                currentBatch.getByteCount());
                     }
                     
                     Channel channel = configurationService.getChannel(currentBatch.getChannelId());
@@ -1275,7 +1368,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                     ctx.put(Constants.DATA_CONTEXT_SOURCE_NODE, nodeService.findIdentity());
                     new DataProcessor(dataReader, new ProcessInfoDataWriter(dataWriter, processInfo), "send from stage")
                             .process(ctx);
-                    if (dataReader.getStatistics().size() > 0) {
+                    if (dataReader.getStatistics().size() > 0 && currentBatch.getSentCount() == 1) {
                         Statistics stats = dataReader.getStatistics().values().iterator().next();
                         statisticManager.incrementDataSent(currentBatch.getChannelId(),
                                 stats.get(DataReaderStatistics.READ_RECORD_COUNT));
@@ -1389,9 +1482,11 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                     }
                 }
                 
-                statisticManager.incrementDataSent(batch.getChannelId(), batch.getDataRowCount());
-                statisticManager.incrementDataBytesSent(batch.getChannelId(), totalBytesRead);
-
+                if (batch.getSentCount() == 1) {
+	                statisticManager.incrementDataSent(batch.getChannelId(), batch.getDataRowCount());
+	                statisticManager.incrementDataBytesSent(batch.getChannelId(), totalBytesRead);
+                }
+                
                 if (log.isDebugEnabled() && totalThrottleTime > 0) {
                     log.debug("Batch '{}' for node '{}' took {}ms for {} bytes and was throttled for {}ms because limit is set to {} KB/s",
                             batch.getBatchId(), batch.getNodeId(), (System.currentTimeMillis() - startTime), totalBytesRead,
@@ -1620,7 +1715,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
     }
 
     protected String replaceVariables(Node sourceNode, Node targetNode, String str) {
-        str = FormatUtils.replace("sourceNodeId", sourceNode.getNodeGroupId(), str);
+        str = FormatUtils.replace("sourceNodeId", sourceNode.getNodeId(), str);
         str = FormatUtils.replace("sourceExternalId", sourceNode.getExternalId(), str);
         str = FormatUtils.replace("sourceNodeGroupId", sourceNode.getNodeGroupId(), str);
         str = FormatUtils.replace("targetNodeId", targetNode.getNodeGroupId(), str);
@@ -1666,7 +1761,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                 ExtractStatus.NE.name());
     }
 
-    private class NodeQueuePair {
+    private static class NodeQueuePair {
         private String nodeId;
         private String queue;
         public String getNodeId() {
@@ -1683,7 +1778,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
         }
     }
     
-    class NodeQueuePairMapper implements ISqlRowMapper<NodeQueuePair> {
+    static class NodeQueuePairMapper implements ISqlRowMapper<NodeQueuePair> {
         @Override
         public NodeQueuePair mapRow(Row row) {
             NodeQueuePair pair = new NodeQueuePair();
@@ -1743,7 +1838,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
     
     protected boolean canProcessExtractRequest(ExtractRequest request, CommunicationType communicationType) {
         Trigger trigger = this.triggerRouterService.getTriggerById(request.getTriggerId());
-        if (! trigger.getSourceTableName().equalsIgnoreCase(TableConstants.getTableName(tablePrefix,
+        if (trigger == null || !trigger.getSourceTableName().equalsIgnoreCase(TableConstants.getTableName(tablePrefix,
                 TableConstants.SYM_FILE_SNAPSHOT))) {
             return true;
         } else {            
@@ -1943,7 +2038,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
             List<Column> lobColumns = table.getLobColumns(platform);
             for (Column c : lobColumns) {
                 String value = colMap.get(c.getName());
-                if (value != null && value.equals("\b")) {
+                if (value != null && (value.equals("\b") || value.equals("08"))) {
                     return true;
                 }
             }
@@ -1971,7 +2066,54 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
     }
 
     class ColumnsAccordingToTriggerHistory {
-        Map<Integer, Table> cache = new HashMap<Integer, Table>();
+        class CacheKey{
+            private String routerId;
+            private int triggerHistoryId;
+            private boolean setTargetTableName;
+            private boolean useDatabaseDefinition;
+            
+            public CacheKey(String routerId, int triggerHistoryId, boolean setTargetTableName,
+                    boolean useDatabaseDefinition) {
+                 this.routerId = routerId;
+                 this.triggerHistoryId = triggerHistoryId;
+                 this.setTargetTableName = setTargetTableName;
+                 this.useDatabaseDefinition = useDatabaseDefinition;
+            }
+            @Override
+            public int hashCode() {
+                final int prime = 31;
+                int result = 1;
+                result = prime * result + ((routerId == null) ? 0 : routerId.hashCode());
+                result = prime * result + (setTargetTableName ? 1231 : 1237);
+                result = prime * result + triggerHistoryId;
+                result = prime * result + (useDatabaseDefinition ? 1231 : 1237);
+                return result;
+            }
+            @Override
+            public boolean equals(Object obj) {
+                if (this == obj)
+                    return true;
+                if (obj == null)
+                    return false;
+                if (getClass() != obj.getClass())
+                    return false;
+                CacheKey other = (CacheKey) obj;
+                if (routerId == null) {
+                    if (other.routerId != null)
+                        return false;
+                } else if (!routerId.equals(other.routerId))
+                    return false;
+                if (setTargetTableName != other.setTargetTableName)
+                    return false;
+                if (triggerHistoryId != other.triggerHistoryId)
+                    return false;
+                if (useDatabaseDefinition != other.useDatabaseDefinition)
+                    return false;
+                return true;
+            }
+        }
+        
+        Map<CacheKey, Table> cache = new HashMap<CacheKey, Table>();
         Node sourceNode;
         Node targetNode;
         
@@ -1979,13 +2121,8 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
             this.sourceNode = sourceNode;
             this.targetNode = targetNode;
         }
-
         public Table lookup(String routerId, TriggerHistory triggerHistory, boolean setTargetTableName, boolean useDatabaseDefinition) {            
-            final int prime = 31;
-            int key = prime + ((routerId == null) ? 0 : routerId.hashCode());
-            key = prime * key + (setTargetTableName ? 1231 : 1237);
-            key = prime * key + ((triggerHistory == null) ? 0 : triggerHistory.getTriggerHistoryId());
-            key = prime * key + (useDatabaseDefinition ? 1231 : 1237);
+            CacheKey key = new CacheKey(routerId, triggerHistory.getTriggerHistoryId(), setTargetTableName, useDatabaseDefinition);
             Table table = cache.get(key);
             if (table == null) {
                 table = lookupAndOrderColumnsAccordingToTriggerHistory(routerId, triggerHistory, sourceNode,
@@ -2031,6 +2168,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                     sourceNode.getNodeId(), outgoingBatch.getNodeId(), outgoingBatch.isCommonFlag());
             this.targetNode = targetNode;
             this.columnsAccordingToTriggerHistory = new ColumnsAccordingToTriggerHistory(sourceNode, targetNode);
+            this.outgoingBatch.resetExtractRowStats();
         }
 
         public Batch getBatch() {
@@ -2122,41 +2260,43 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                         Trigger trigger = triggerRouterService.getTriggerById(
                                 triggerHistory.getTriggerId(), false);
                         boolean isFileParserRouter = triggerHistory.getTriggerId().equals(AbstractFileParsingRouter.TRIGGER_ID_FILE_PARSER);
-                        if (trigger != null || isFileParserRouter) {
-                            if (lastTriggerHistory == null || lastTriggerHistory
-                                    .getTriggerHistoryId() != triggerHistory.getTriggerHistoryId() || 
-                                    lastRouterId == null || !lastRouterId.equals(routerId)) {
-                                
-                                this.sourceTable = columnsAccordingToTriggerHistory.lookup(
-                                            routerId, triggerHistory, false, !isFileParserRouter);
-                                
-                                this.targetTable = columnsAccordingToTriggerHistory.lookup(
-                                        routerId, triggerHistory, true, false);
-                                
-                                if (trigger != null && trigger.isUseStreamLobs() || (data.getRowData() != null && hasLobsThatNeedExtract(sourceTable, data))) {
-                                    this.requiresLobSelectedFromSource = true;
-                                } else {
-                                    this.requiresLobSelectedFromSource = false;
-                                }
-                            }
-
-                            data.setNoBinaryOldData(requiresLobSelectedFromSource
-                                    || symmetricDialect.getName().equals(
-                                            DatabaseNamesConstants.MSSQL2000)
-                                    || symmetricDialect.getName().equals(
-                                            DatabaseNamesConstants.MSSQL2005)
-                                    || symmetricDialect.getName().equals(
-                                            DatabaseNamesConstants.MSSQL2008));
-                            
-                            outgoingBatch.incrementExtractRowCount();
-                            outgoingBatch.incrementExtractRowCount(data.getDataEventType());
-                        } else {
-                            log.error(
-                                    "Could not locate a trigger with the id of {} for {}.  It was recorded in the hist table with a hist id of {}",
+                        if (trigger == null && !isFileParserRouter) {
+                            log.warn(
+                                    "Could not locate a trigger with the id of {} for table {} (data id {} with trigger hist id {}). It's possible this trigger was deleted before the batch could be extracted.",
                                     new Object[] { triggerHistory.getTriggerId(),
                                             triggerHistory.getSourceTableName(),
+                                            data.getDataId(),
                                             triggerHistory.getTriggerHistoryId() });
                         }
+                        
+                        if (lastTriggerHistory == null || lastTriggerHistory
+                                .getTriggerHistoryId() != triggerHistory.getTriggerHistoryId() || 
+                                lastRouterId == null || !lastRouterId.equals(routerId)) {
+                            
+                            this.sourceTable = columnsAccordingToTriggerHistory.lookup(
+                                        routerId, triggerHistory, false, !isFileParserRouter);
+                            
+                            this.targetTable = columnsAccordingToTriggerHistory.lookup(
+                                    routerId, triggerHistory, true, false);
+                            
+                            if (trigger != null && trigger.isUseStreamLobs() || (data.getRowData() != null && hasLobsThatNeedExtract(sourceTable, data))) {
+                                this.requiresLobSelectedFromSource = true;
+                            } else {
+                                this.requiresLobSelectedFromSource = false;
+                            }
+                        }
+
+                        data.setNoBinaryOldData(requiresLobSelectedFromSource
+                                || symmetricDialect.getName().equals(
+                                        DatabaseNamesConstants.MSSQL2000)
+                                || symmetricDialect.getName().equals(
+                                        DatabaseNamesConstants.MSSQL2005)
+                                || symmetricDialect.getName().equals(
+                                        DatabaseNamesConstants.MSSQL2008));
+                        
+                        outgoingBatch.incrementExtractRowCount();
+                        outgoingBatch.incrementExtractRowCount(data.getDataEventType());
+                            
                         if (data.getDataEventType() == DataEventType.CREATE && StringUtils.isBlank(data.getCsvData(CsvData.ROW_DATA))) {                          
 
                             boolean excludeDefaults = parameterService.is(ParameterConstants.CREATE_TABLE_WITHOUT_DEFAULTS, false);
@@ -2204,6 +2344,14 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                             			column.setPrimaryKey(false);
                             		}
                             	
+                            }
+                            if (parameterService.is(ParameterConstants.MYSQL_TINYINT_DDL_TO_BOOLEAN, false)) {
+	                            	for (Column column : copyTargetTable.getColumns()) {
+	                            		if (column.getJdbcTypeCode() == Types.TINYINT) {
+	                            			column.setJdbcTypeCode(Types.BOOLEAN);
+	                            			column.setMappedTypeCode(Types.BOOLEAN);
+	                            		}
+	                        		}
                             }
                             data.setRowData(CsvUtils.escapeCsvData(DatabaseXmlUtil.toXml(db)));
                         }
@@ -2263,6 +2411,18 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
         private TriggerRouter triggerRouter;
         
         private ColumnsAccordingToTriggerHistory columnsAccordingToTriggerHistory;
+        
+        private String overrideSelectSql;
+
+        private boolean isSelfReferencingFk;
+        
+        private int selfRefLevel;
+        
+        private String selfRefParentColumnName;
+        
+        private String selfRefChildColumnName;
+        
+        boolean isFirstRow;
 
         public SelectFromTableSource(OutgoingBatch outgoingBatch, Batch batch,
                 SelectFromTableEvent event) {
@@ -2270,6 +2430,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
             List<SelectFromTableEvent> initialLoadEvents = new ArrayList<DataExtractorService.SelectFromTableEvent>(
                     1);
             initialLoadEvents.add(event);
+            this.outgoingBatch.resetExtractRowStats();
             this.init(batch, initialLoadEvents);
         }
 
@@ -2325,6 +2486,8 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
             if (this.currentInitialLoadEvent == null && selectFromTableEventsToSend.size() > 0) {
                 this.currentInitialLoadEvent = selectFromTableEventsToSend.remove(0);
                 TriggerHistory history = this.currentInitialLoadEvent.getTriggerHistory();
+                this.isSelfReferencingFk = false;
+                this.isFirstRow = true;
                 if (this.currentInitialLoadEvent.containsData()) {
                     data = this.currentInitialLoadEvent.getData();
                     this.currentInitialLoadEvent = null;
@@ -2345,19 +2508,45 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
                             .getRouter().getRouterId(), history, false, true);
                     this.targetTable = columnsAccordingToTriggerHistory.lookup(triggerRouter
                             .getRouter().getRouterId(), history, true, false);
-         
-                    this.startNewCursor(history, triggerRouter,
-                            this.currentInitialLoadEvent.getInitialLoadSelect());
+                    
+                    this.overrideSelectSql = currentInitialLoadEvent.getInitialLoadSelect();
+                    if (overrideSelectSql != null && overrideSelectSql.trim().toUpperCase().startsWith("WHERE")) {
+                        overrideSelectSql = overrideSelectSql.trim().substring(5);
+                    }
 
+                    ForeignKey fk = this.sourceTable.getSelfReferencingForeignKey();
+                    if (fk != null) {
+                        Reference[] refs = fk.getReferences();
+                        if (refs.length == 1) {
+                            this.isSelfReferencingFk = true;
+                            this.selfRefParentColumnName = refs[0].getLocalColumnName();
+                            this.selfRefChildColumnName = refs[0].getForeignColumnName();
+                            this.selfRefLevel = 0;
+                            log.info("Ordering rows for table {} using self-referencing foreign key {} -> {}", 
+                                    this.sourceTable.getName(), this.selfRefParentColumnName, this.selfRefChildColumnName);
+                        } else {
+                            log.warn("Unable to order rows for self-referencing foreign key because it contains multiple columns");
+                        }
+                    }
+
+                    this.startNewCursor(history, triggerRouter);
                 }
-
             }
 
             if (this.cursor != null) {
                 data = this.cursor.next();
                 if (data == null) {
                     closeCursor();
+                    if (isSelfReferencingFk && !this.isFirstRow) {
+                        this.selfRefLevel++;
+                        this.startNewCursor(this.currentInitialLoadEvent.getTriggerHistory(), triggerRouter);
+                        this.isFirstRow = true;
+                    } else {
+                        this.currentInitialLoadEvent = null;
+                    }
                     data = next();
+                } else if (this.isFirstRow) {
+                    this.isFirstRow = false;
                 }
             }
 
@@ -2368,21 +2557,49 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
             if (this.cursor != null) {
                 this.cursor.close();
                 this.cursor = null;
-                this.currentInitialLoadEvent = null;
             }
         }
 
         protected void startNewCursor(final TriggerHistory triggerHistory,
-                final TriggerRouter triggerRouter, String overrideSelectSql) {
-            if (overrideSelectSql != null && overrideSelectSql.trim().toUpperCase().startsWith("WHERE")) {
-                overrideSelectSql = overrideSelectSql.trim().substring(5);
+                final TriggerRouter triggerRouter) {
+
+            String selectSql = overrideSelectSql;
+            if (isSelfReferencingFk) {
+                if (selectSql == null) {
+                    selectSql = "";
+                } else if (StringUtils.isNotBlank(selectSql)) {
+                    selectSql += " and ";
+                }
+
+                if (selfRefLevel == 0) {
+                    selectSql += selfRefParentColumnName + " is null or " + selfRefParentColumnName + " = " + selfRefChildColumnName + " ";
+                } else {
+                    DatabaseInfo info = symmetricDialect.getPlatform().getDatabaseInfo();
+                    String tableName = Table.getFullyQualifiedTableName(sourceTable.getCatalog(), sourceTable.getSchema(),
+                            sourceTable.getName(), info.getDelimiterToken(), info.getCatalogSeparator(), info.getSchemaSeparator());                    
+                    String refSql= "select " + selfRefChildColumnName + " from " + tableName + 
+                            " where " + selfRefParentColumnName;
+                    selectSql += selfRefParentColumnName + " in (";
+
+                    for (int i = 1; i < selfRefLevel; i++) {
+                        selectSql += refSql + " in (";
+                    }
+                    selectSql += refSql + " is null or " + selfRefChildColumnName + " = " + selfRefParentColumnName + " ) and " + 
+                            selfRefParentColumnName + " != " + selfRefChildColumnName + StringUtils.repeat(")", selfRefLevel - 1);
+                }
+                log.info("Querying level {} for table {}: {}", selfRefLevel, sourceTable.getName(), selectSql);
             }
-            final String initialLoadSql = symmetricDialect.createInitialLoadSqlFor(
+            
+            String sql = symmetricDialect.createInitialLoadSqlFor(
                     this.currentInitialLoadEvent.getNode(), triggerRouter, sourceTable,
                     triggerHistory,
                     configurationService.getChannel(triggerRouter.getTrigger().getChannelId()),
-                    overrideSelectSql);
-
+                    selectSql);
+            for (IReloadVariableFilter filter : extensionService.getExtensionPointList(IReloadVariableFilter.class)) {
+                sql = filter.filterInitalLoadSql(sql, node, targetTable);
+            }
+            
+            final String initialLoadSql = sql;
             final int expectedCommaCount = triggerHistory.getParsedColumnNames().length - 1;
             final boolean selectedAsCsv = symmetricDialect.getParameterService().is(
                     ParameterConstants.INITIAL_LOAD_CONCAT_CSV_IN_SQL_ENABLED); 
@@ -2500,13 +2717,13 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
 
     }
 
-    class FutureExtractStatus {
+    static class FutureExtractStatus {
         boolean shouldExtractSkip;
         int batchExtractCount;
         int byteExtractCount;
     }
 
-    class FutureOutgoingBatch {
+    static class FutureOutgoingBatch {
         OutgoingBatch outgoingBatch;
         boolean isRetry;
         boolean isExtractSkipped;
@@ -2525,7 +2742,7 @@ public class DataExtractorService extends AbstractService implements IDataExtrac
         }
     }
     
-    class BatchLock {
+    static class BatchLock {
         public BatchLock(String semaphoreKey) {
             this.semaphoreKey = semaphoreKey;
         }

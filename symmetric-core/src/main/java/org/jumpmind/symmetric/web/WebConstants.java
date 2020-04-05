@@ -60,6 +60,8 @@ public class WebConstants {
     public static final int SC_SERVICE_BUSY = 670;
     
     public static final int SC_NO_CONTENT = 204;
+    
+    public static final int SC_OK = 200;
 
     public static final String ACK_BATCH_NAME = "batch-";
 
@@ -88,6 +90,8 @@ public class WebConstants {
     public static final String ACK_SQL_MESSAGE = "sqlMessage-";
     
     public static final String ACK_LOAD_ROW_COUNT = "loadRowCount-";
+    
+    public static final String TRANSFORM_TIME = "transformTime-";
     
     public static final String ACK_LOAD_INSERT_ROW_COUNT = "loadInsertRowCount-";
     

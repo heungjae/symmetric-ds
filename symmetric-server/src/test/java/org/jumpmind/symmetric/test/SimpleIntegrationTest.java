@@ -111,6 +111,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
 
     @Test(timeout = 3600000)
     public void test01CreateServer() {
+        logTestRunning();
         ISymmetricEngine server = getServer();
         assertNotNull(server);
         server.getParameterService().saveParameter(ParameterConstants.FILE_SYNC_ENABLE, false, "unit_test");
@@ -213,6 +214,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
 
     @Test(timeout = 900000)
     public void test04LobSyncUsingStreaming() throws Exception {
+        logTestRunning();
         String text = "Another test.  Should not find this in text in sym_data, but it should be in the client database";
         if (serverTestService.insertIntoTestUseStreamLob(200, "test_use_stream_lob", text)) {
             //IDatabasePlatform platform = getServer().getDatabasePlatform();
@@ -230,6 +232,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
 
     @Test(timeout = 900000)
     public void test05LobSyncUsingCapture() throws Exception {
+        logTestRunning();
         String text = "Another test.  Should not find this in text in sym_data, but it should be in the client database";
         if (serverTestService.insertIntoTestUseStreamLob(200, "test_use_capture_lob", text)) {
             String rowData = getServer()
@@ -320,6 +323,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
 
     @Test(timeout = 900000)
     public void test08InsertSqlEvent() {
+        logTestRunning();
         assertTrue(getClient().getSqlTemplate().queryForInt(
                 "select count(*) from sym_node where schema_version='test'") == 0);
         getServer()
@@ -333,6 +337,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
 
     @Test(timeout = 900000)
     public void test09EmptyNullLob() {
+        logTestRunning();
         Customer customer = new Customer(300, "Eric", true, "100 Main Street", "Columbus", "OH",
                 43082, new Date(), new Date(), "", new byte[0]);
 
@@ -382,6 +387,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
         if (!isServerOracle()) {
             return;
         }
+        logTestRunning();
         String bigString = StringUtils.rightPad("Feeling tired... ", 6000, "Z");
         Customer customer = new Customer(400, "Eric", true, "100 Main Street", "Columbus", "OH",
                 43082, new Date(), new Date(), bigString, bigString.getBytes());
@@ -692,6 +698,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
 
     @Test(timeout = 900000)
     public void test15UpdateDataWithNoChangesSyncToClient() throws Exception {
+        logTestRunning();
         int clientIncomingBatchCount = getIncomingBatchCountForClient();
         int rowsUpdated = getServer().getSqlTemplate().update(
                 "update test_sync_column_level set string_value=string_value");
@@ -1000,8 +1007,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
         int batchId = getServer().getSqlTemplate().queryForInt("select min(batch_id) from sym_outgoing_batch");
         int purgeCount = getServer().getSqlTemplate().queryForInt("select count(*) from sym_data_event where batch_id = ?", batchId);
 
-        // Purge always leaves the last item in a table, so we have to abandon at least two
-        getServer().getSqlTemplate().update("delete from sym_outgoing_batch where batch_id in (?, ?)", batchId, batchId + 1);
+        getServer().getSqlTemplate().update("delete from sym_outgoing_batch where batch_id = ?", batchId);
 
         IParameterService parameterService = getServer().getParameterService();
         int purgeRetentionMinues = parameterService.getInt(ParameterConstants.PURGE_RETENTION_MINUTES);
@@ -1133,6 +1139,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
     
     @Test
     public void test30AutoConfigureTablesAfterAlreadyCreated() {
+        logTestRunning();
         testAutoConfigureTablesAfterAlreadyCreated(getServer());
         testAutoConfigureTablesAfterAlreadyCreated(getClient());
     }
@@ -1146,6 +1153,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
                 getClient().getSymmetricDialect().getName().equalsIgnoreCase(DatabaseNamesConstants.GENERIC)) {
             return;
         }
+        logTestRunning();
         ISqlTransaction tran = getServer().getSqlTemplate().startSqlTransaction();
         getServer().getSymmetricDialect().disableSyncTriggers(tran, null);
         tran.execute("insert into test_a (id) values ('1')");
@@ -1167,6 +1175,7 @@ public class SimpleIntegrationTest extends AbstractIntegrationTest {
     
     @Test
     public void test99Shutdown() throws Exception {
+        logTestRunning();
         getClient().destroy();
         getWebServer().stop();
     }

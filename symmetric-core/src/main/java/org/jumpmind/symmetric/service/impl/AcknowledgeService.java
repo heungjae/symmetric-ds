@@ -72,7 +72,7 @@ public class AcknowledgeService extends AbstractService implements IAcknowledgeS
         } else {
             OutgoingBatch outgoingBatch = outgoingBatchService
                     .findOutgoingBatch(batch.getBatchId(), batch.getNodeId());
-            Status status = batch.isOk() ? Status.OK : batch.isResend() ? Status.RS : Status.ER;
+            Status status = batch.isResend() ? Status.RS : batch.isOk() ? Status.OK : Status.ER;
             if (outgoingBatch != null) {
                 // Allow an outside system/user to indicate that a batch
                 // is OK.
@@ -102,6 +102,7 @@ public class AcknowledgeService extends AbstractService implements IAcknowledgeS
                 outgoingBatch.setLoadRowCount(batch.getLoadRowCount());
                 outgoingBatch.setLoadInsertRowCount(batch.getLoadInsertRowCount());
                 outgoingBatch.setLoadUpdateRowCount(batch.getLoadUpdateRowCount());
+                outgoingBatch.setTransformLoadMillis(batch.getTransformLoadMillis());
                 outgoingBatch.setLoadDeleteRowCount(batch.getLoadDeleteRowCount());
                 outgoingBatch.setFallbackInsertCount(batch.getFallbackInsertCount());
                 outgoingBatch.setFallbackUpdateCount(batch.getFallbackUpdateCount());
@@ -111,8 +112,14 @@ public class AcknowledgeService extends AbstractService implements IAcknowledgeS
 
                 boolean isNewError = false;
                 if (!batch.isOk() && batch.getErrorLine() != 0) {
-                    List<Number> ids = sqlTemplateDirty.query(getSql("selectDataIdSql"),
-                            new NumberMapper(), outgoingBatch.getBatchId());
+                    String sql = getSql("selectDataIdSql");
+                    if (parameterService.is(ParameterConstants.DBDIALECT_ORACLE_SEQUENCE_NOORDER, false)) {
+                        sql = getSql("selectDataIdByCreateTimeSql");
+                    } else if (parameterService.is(ParameterConstants.ROUTING_DATA_READER_ORDER_BY_DATA_ID_ENABLED, true)) {
+                        sql += getSql("orderByDataId");
+                    }
+
+                    List<Number> ids = sqlTemplateDirty.query(sql, new NumberMapper(), outgoingBatch.getBatchId());
                     if (ids.size() >= batch.getErrorLine()) {
                         long failedDataId = ids.get((int) batch.getErrorLine() - 1).longValue();
                         if (outgoingBatch.getFailedDataId() == 0 || outgoingBatch.getFailedDataId() != failedDataId) {

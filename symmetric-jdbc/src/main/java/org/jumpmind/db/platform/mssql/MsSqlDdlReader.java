@@ -20,6 +20,7 @@ package org.jumpmind.db.platform.mssql;
  */
 
 import static org.apache.commons.lang.StringUtils.isNotBlank;
+import static org.jumpmind.db.model.ColumnTypes.MAPPED_TIMESTAMPTZ;
 
 import java.sql.Connection;
 import java.sql.Date;
@@ -34,6 +35,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.commons.lang.StringUtils;
 import org.jumpmind.db.model.Column;
 import org.jumpmind.db.model.IIndex;
 import org.jumpmind.db.model.PlatformColumn;
@@ -93,6 +95,10 @@ public class MsSqlDdlReader extends AbstractJdbcDdlReader {
         }
 
         Table table = super.readTable(connection, metaData, values);
+        
+        if(StringUtils.equalsIgnoreCase(table.getSchema(),"sys")){
+            return null;
+        }
 
         if (table != null) {
             // Sql Server does not return the auto-increment status via the
@@ -156,30 +162,38 @@ public class MsSqlDdlReader extends AbstractJdbcDdlReader {
         }
     }
 
+    @Override
     protected Integer mapUnknownJdbcTypeForColumn(Map<String, Object> values) {
         String typeName = (String) values.get("TYPE_NAME");
         int size = -1;
         String columnSize = (String) values.get("COLUMN_SIZE");
-            if (isNotBlank(columnSize)) {
-                size = Integer.parseInt(columnSize);
-            }
-        if (typeName != null && typeName.toLowerCase().startsWith("text")) {
-            return Types.LONGVARCHAR;
-        } else if (typeName != null && typeName.toLowerCase().startsWith("ntext")) {
-            return Types.CLOB;
-        } else if (typeName != null && typeName.toLowerCase().equals("float")) {
-            return Types.FLOAT;
-        } else if (typeName != null && typeName.toUpperCase().contains(TypeMap.GEOMETRY)) {
-            return Types.VARCHAR;
-        } else if (typeName != null && typeName.toUpperCase().contains("VARCHAR") && size > 8000) {
-            return Types.LONGVARCHAR;
-        } else if (typeName != null && typeName.toUpperCase().contains("NVARCHAR") && size > 4000) {
-            return Types.LONGNVARCHAR;
-        } else if (typeName != null && typeName.toUpperCase().equals("SQL_VARIANT")) {
-            return Types.BINARY;
-        } else {
-            return super.mapUnknownJdbcTypeForColumn(values);
+        if (isNotBlank(columnSize)) {
+            size = Integer.parseInt(columnSize);
         }
+        if (typeName != null) {            
+            if (typeName.toLowerCase().startsWith("text")) {
+                return Types.LONGVARCHAR;
+            } else if ( typeName.toLowerCase().startsWith("ntext")) {
+                return Types.CLOB;
+            } else if ( typeName.toLowerCase().equals("float")) {
+                return Types.FLOAT;
+            } else if (typeName.toUpperCase().contains(TypeMap.GEOMETRY)) {
+                return Types.VARCHAR;
+            } else if (typeName.toUpperCase().contains(TypeMap.GEOGRAPHY)) {
+                return Types.VARCHAR;
+            } else if (typeName.toUpperCase().contains("VARCHAR") && size > 8000) {
+                return Types.LONGVARCHAR;
+            } else if (typeName.toUpperCase().contains("NVARCHAR") && size > 4000) {
+                return Types.LONGNVARCHAR;
+            } else if ( typeName.toUpperCase().equals("SQL_VARIANT")) {
+                return Types.BINARY;
+            } else if (typeName.equalsIgnoreCase("DATETIMEOFFSET")) {
+                return MAPPED_TIMESTAMPTZ;            
+            } else if (typeName.equalsIgnoreCase("datetime2")) {
+                return Types.TIMESTAMP;
+            }
+        }
+        return super.mapUnknownJdbcTypeForColumn(values); 
     }
 
     @Override
